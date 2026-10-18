@@ -4,6 +4,8 @@
 
 The single source version remains 0.2.0 in package.json, src-tauri/Cargo.toml and src-tauri/tauri.conf.json. The next local review candidate uses macOS `CFBundleVersion` 2 to distinguish it from the earlier build 1. The bundle identifier remains `local.fox.guard`; no application identity is changed.
 
+Read-only metadata inspection of the currently installed local Guard bundle on 2026-10-18 reports version `0.2.0`, build `1`, and bundle ID `local.fox.guard`. Build 2 is newer by bundle-version ordering and can be prepared as a review candidate; that does not establish that an in-place upgrade is safe or supported. No replacement or installation has been performed.
+
 The internal npm and Cargo package names remain requirement-french. They are not user-facing product identity, and renaming them is not required for a private Guard review build. Keep the existing bundle identifier stable: changing it would create a different macOS application identity and is unnecessary for this closeout.
 
 ## Release status

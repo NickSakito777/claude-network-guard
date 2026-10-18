@@ -56,6 +56,20 @@ A matching metadata result is not a deployment receipt or a security acceptance 
 
 Do not convert fixture success, matching hashes, or a candidate metadata match into `passed` acceptance rows. Existing installation and preflight records remain historical evidence for their recorded time and artifact. This command creates no receipt and changes no acceptance status.
 
+## Code-signature evidence (2026-10-18)
+
+Keep three checks distinct:
+
+1. `codesign --verify --strict --verbose=4 <bundle>` checks the on-disk code seal and the bundle's embedded designated requirement. It does not test the separate `codeRequirement` expression selected by a Guard manifest, and it does not validate a running process by PID.
+2. A read-only static test of a reviewed manifest expression can use `codesign -v -R='<exact Claude codeRequirement from that manifest>' /Applications/Claude.app`. This tests that expression against the same on-disk bundle only; it is not a substitute for the runtime PID check.
+3. The production supervisor parses the manifest requirement with `SecRequirementCreateWithString`, obtains `SecCode` for the PID using `SecCodeCopyGuestWithAttributes`, and calls `SecCodeCheckValidity` with `kSecCSStrictValidate`. Before signaling, cleanup separately rechecks PID, UID, birth time, path, and signature in `lg_signal_if_same` (`native/macos/handover/LegacyProcess.c`). A successful static bundle check cannot establish those live-process facts.
+
+The user's ordinary Terminal reported that the static command passed for Calculator and Claude, including the shown Claude helpers/frameworks, with `valid on disk` and `satisfies its Designated Requirement`. This is user-provided terminal evidence, not a reproduction by the Codex execution context.
+
+The same static command in the Codex execution context returned exit 1 for `/Applications/Claude.app` (`invalid signature (code or signature have been modified)`, arm64) and exit 1 for the `/System/Applications/Calculator.app` control (`CSSMERR_TP_NOT_TRUSTED`, arm64e.x1). These observations conflict. They do not establish that the target bundle is damaged, and the reason for the context difference is unknown. Do not weaken the production manifest-requirement or live-PID checks based on either static result. No corresponding user-Terminal verification was provided for AdsPower; no conclusion about it is made.
+
+No runtime PID signature validation was performed as part of these observations. The evidence is not an installation or enforcement receipt.
+
 For the isolated regression fixture, run (with the repository Command Line Tools environment on this host):
 
 ```sh
