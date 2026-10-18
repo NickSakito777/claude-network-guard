@@ -797,7 +797,8 @@ def build_candidate_app(output_directory, reviewed_manifest_path):
 
     # mkdir is the exclusive reservation: an existing or concurrently claimed path is never replaced.
     output_directory.mkdir(mode=0o700)
-    build_env = dict(os.environ, DEVELOPER_DIR='/Library/Developer/CommandLineTools')
+    build_env = dict(os.environ)
+    build_env.setdefault('DEVELOPER_DIR', '/Library/Developer/CommandLineTools')
     identity_overlay = json.dumps(
         {'identifier': identity['bundleIdentifier'], 'bundle': {'resources': None}},
         separators=(',', ':'))

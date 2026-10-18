@@ -7,7 +7,7 @@ export CARGO_HOME="$ROOT/.tools/cargo"
 export CARGO_TARGET_DIR="$ROOT/.tools/target"
 export BUN_INSTALL_CACHE_DIR="$ROOT/.tools/bun-cache"
 export NPM_CONFIG_CACHE="$ROOT/.tools/npm-cache"
-export DEVELOPER_DIR=/Library/Developer/CommandLineTools
+export DEVELOPER_DIR="${DEVELOPER_DIR:-/Library/Developer/CommandLineTools}"
 export PATH="$ROOT/.tools/cargo/bin:$ROOT/.tools/bun/bin:$PATH"
 unset GITHUB_ACTIONS
 case "${1:-}" in
