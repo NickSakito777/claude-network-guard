@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # [INPUT]: SSH 标准输入注入的家宽 SOCKS5 与 VPS 参数；Debian 12/13 root 环境。
-# [OUTPUT]: Xray/Reality、家宽出口、防火墙、SSH 加固与通过自检的 Clash 订阅。
+# [OUTPUT]: Xray/Reality、家宽出口、防火墙、SSH 加固及供只读预检识别的产品状态标记。
 # [POS]: 仓库 Skill 的远端部署层；仅通过已授权 SSH 使用，身份保存在远端 root 状态文件。
 # [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 # =============================================================================
@@ -18,16 +18,18 @@
 # Idempotent: safe to re-run. Generated secrets are persisted in $STATE_FILE and reused.
 # Precedence for every secret: environment variable  >  $STATE_FILE  >  freshly generated.
 #
-# Usage (as root):
-#   HOME_HOST=1.2.3.4 HOME_PORT=1080 HOME_USER=u HOME_PASS=p bash setup-vps.sh
+# This script is an internal payload. Run it only through network.py deploy,
+# which authenticates the host key and checks service/file ownership first.
 #
-# Re-using the current production identity (so existing clients keep working):
-#   XRAY_UUID=... XRAY_PRIVATE_KEY=... XRAY_SHORT_ID=... SUB_TOKEN=... \
-#   HOME_HOST=... HOME_PORT=... HOME_USER=... HOME_PASS=... bash setup-vps.sh
-# (The private key is in /usr/local/etc/xray/config.json on the old server; the public key
-#  is derived from it automatically.)
+# Existing identity state is reused only through the staged `network.py deploy`
+# payload and root-private state file. Do not put secrets in an interactive command.
 # =============================================================================
 set -euo pipefail
+
+[[ "${CCBAGA_PREFLIGHT_APPROVED:-}" == 1 ]] || {
+  printf '[x] Refusing direct execution: run the staged network.py deploy workflow.\n' >&2
+  exit 1
+}
 
 # ----------------------------------------------------------------------------- variables
 # REQUIRED — residential SOCKS5 proxy (placeholders on purpose; never hardcode real creds)
@@ -207,6 +209,7 @@ sysctl --system >/dev/null 2>&1 || warn "sysctl --system reported errors (check:
 log "Hardening SSH (key-only)"
 if [[ -s /root/.ssh/authorized_keys ]] || compgen -G "/home/*/.ssh/authorized_keys" >/dev/null; then
   if write_file /etc/ssh/sshd_config.d/01-hardening.conf "$(cat <<'EOF'
+# CCBaga Network managed SSH hardening
 # setup-vps.sh. Rollback: rm this file; systemctl reload ssh
 PermitRootLogin prohibit-password
 PasswordAuthentication no
@@ -324,7 +327,7 @@ XRAY_PUBLIC_KEY="$(x25519_field 'public|password' <<<"$KEYS")"
 # Persist (root-only) so re-runs keep the same identity
 umask 077
 install -m 600 /dev/null "$STATE_FILE"
-printf 'XRAY_UUID=%s\nXRAY_PRIVATE_KEY=%s\nXRAY_SHORT_ID=%s\nSUB_TOKEN=%s\n' \
+printf 'CCBAGA_NETWORK_MANAGED=1\nXRAY_UUID=%s\nXRAY_PRIVATE_KEY=%s\nXRAY_SHORT_ID=%s\nSUB_TOKEN=%s\n' \
   "$XRAY_UUID" "$XRAY_PRIVATE_KEY" "$XRAY_SHORT_ID" "$SUB_TOKEN" > "$STATE_FILE"
 umask 022
 
@@ -365,7 +368,8 @@ rules += [
 ]
 conf = {
     "log": {"loglevel": "warning"},
-    "dns": {"servers": ["https+local://1.1.1.1/dns-query"], "queryStrategy": "UseIPv4"},
+    # Numeric DoH endpoint enters routing; a hostname SOCKS endpoint has separate bootstrap resolution.
+    "dns": {"servers": ["https://1.1.1.1/dns-query"], "queryStrategy": "UseIPv4"},
     "inbounds": [{
         "port": int(e["XRAY_PORT"]),
         "protocol": "vless",
@@ -470,6 +474,7 @@ EOF
 
   write_file /etc/systemd/system/sub.service "$(cat <<EOF
 [Unit]
+# CCBaga Network managed subscription service
 Description=Clash subscription (static file server)
 After=network.target
 [Service]
@@ -481,6 +486,7 @@ WantedBy=multi-user.target
 EOF
 )" || true
   write_file /etc/systemd/system/sub.service.d/hardening.conf "$(cat <<'EOF'
+# CCBaga Network managed subscription hardening
 # Run the subscription server unprivileged & sandboxed. Rollback: rm this file; systemctl daemon-reload; systemctl restart sub
 [Service]
 DynamicUser=yes

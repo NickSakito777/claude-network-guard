@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # [INPUT]: 本 Skill 执行层、临时密钥/配置和可丢弃本机子进程。
-# [OUTPUT]: URL、配对/权限、注入边界、有界传输、超时和订阅来源离线回归。
-# [POS]: 安装后即可运行的标准库验收；不读取用户配置或连接 VPS。
+# [OUTPUT]: URL、配对/权限、host-key 固定、服务器快照、路由源码不变量、注入边界和失败回归。
+# [POS]: 安装后即可运行的标准库离线验收；不读取用户配置、不连接 VPS，也不证明客户端网络行为。
 # [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+import ast
 import importlib.util
 import json
 import io
@@ -13,6 +14,8 @@ import shutil
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('network', Path(__file__).with_name('network.py'))
 n = importlib.util.module_from_spec(spec); spec.loader.exec_module(n)
@@ -30,7 +33,169 @@ class NetworkTests(unittest.TestCase):
 
     def test_deploy_payload_is_read_as_utf8(self):
         payload = (n.SKILL/'scripts/setup-vps.sh').read_text(encoding='utf-8')
+        self.assertIn('CCBAGA_PREFLIGHT_APPROVED', payload)
+        self.assertIn("'CCBAGA_PREFLIGHT_APPROVED': '1'", Path(n.__file__).read_text())
+        start = payload.index('python3 - "$NEW_CONF" <<\'PY\'\n') + len('python3 - "$NEW_CONF" <<\'PY\'\n')
+        end = payload.index('\nPY\nxray run -test', start)
+        ast.parse(payload[start:end])
         self.assertIn('set -euo pipefail', payload)
+        self.assertIn('CCBAGA_NETWORK_MANAGED=1', payload)
+        self.assertIn('# CCBaga Network managed SSH hardening', payload)
+        self.assertIn('# CCBaga Network managed subscription service', payload)
+        self.assertIn('# CCBaga Network managed subscription hardening', payload)
+        self.assertIn('"network": "udp", "outboundTag": "block"', payload)
+        self.assertIn('"network": "tcp", "outboundTag": "home"', payload)
+        self.assertIn('ipv6: false', payload)
+        self.assertIn('udp: false', payload)
+        self.assertIn('IP-CIDR,223.5.5.5/32,DIRECT,no-resolve', payload)
+        self.assertIn('proxies: [${NODE_NAME}, REJECT]', payload)
+        self.assertIn('"servers": ["https://1.1.1.1/dns-query"]', payload)
+        self.assertNotIn('https+local://1.1.1.1/dns-query', payload)
+        self.assertIn("export DIRECT_DOMAINS=' '", n.exports(self.config()))
+
+    def test_host_identity_requires_out_of_band_fingerprint_before_ssh(self):
+        pem = self.root/'host'
+        subprocess.run(['ssh-keygen','-q','-t','ed25519','-N','','-f',str(pem)],check=True)
+        key_type, blob = pem.with_suffix('.pub').read_text().split()[:2]
+        candidate = {'host':'vps.example.com','type':key_type,'blob':blob,
+                     'fingerprint':n.key_fingerprint(key_type,blob)}
+        config_path = self.root/'connection.json'
+        legacy_hosts = self.root/'known_hosts'
+        legacy_hosts.write_text('existing-known-hosts-receipt\n')
+        legacy_content = legacy_hosts.read_bytes()
+
+        with patch.object(n, 'scan_host_keys', return_value=[candidate]), patch.object(n, 'execute') as remote:
+            output = io.StringIO()
+            with redirect_stdout(output):
+                n.identity(self.config(), pem, config_path)
+            remote.assert_not_called()
+        self.assertIn(candidate['fingerprint'], output.getvalue())
+        self.assertIn('No SSH authentication or server command was sent', output.getvalue())
+        self.assertNotIn(blob, output.getvalue())
+        pin = self.root/'known_hosts.pinned'
+        self.assertFalse(pin.exists())
+        with patch.object(n, 'scan_host_keys', return_value=[candidate]):
+            with self.assertRaises(ValueError):
+                n.pin_host_key(self.config(), config_path, 'SHA256:provider-mismatch')
+        self.assertFalse(pin.exists())
+
+        with patch.object(n, 'scan_host_keys', return_value=[candidate]), \
+             patch.object(n, 'execute', return_value='ROOT=verified; OS=12') as remote:
+            output = io.StringIO()
+            with redirect_stdout(output):
+                n.identity(self.config(), pem, config_path, candidate['fingerprint'])
+            self.assertIn('StrictHostKeyChecking=yes', remote.call_args.args[0])
+            self.assertNotIn('accept-new', remote.call_args.args[0])
+        self.assertEqual(pin.read_text(), f"{candidate['host']} {candidate['type']} {candidate['blob']}\n")
+        self.assertEqual(pin.stat().st_mode & 0o777, 0o600)
+        self.assertIn('SSH_HOST_KEY_VERIFIED=' + candidate['fingerprint'], output.getvalue())
+        self.assertEqual(legacy_hosts.read_bytes(), legacy_content)
+
+        other = self.root/'other-host'
+        subprocess.run(['ssh-keygen','-q','-t','ed25519','-N','','-f',str(other)],check=True)
+        other_type, other_blob = other.with_suffix('.pub').read_text().split()[:2]
+        replacement = {'host':candidate['host'],'type':other_type,'blob':other_blob,
+                       'fingerprint':n.key_fingerprint(other_type,other_blob)}
+        original = pin.read_bytes()
+        with patch.object(n, 'scan_host_keys', return_value=[replacement]):
+            with self.assertRaises(ValueError):
+                n.pin_host_key(self.config(), config_path, replacement['fingerprint'])
+        self.assertEqual(pin.read_bytes(), original)
+
+    def test_host_key_scan_uses_openssh_without_exposing_raw_scan_output(self):
+        pem = self.root/'host'
+        subprocess.run(['ssh-keygen','-q','-t','ed25519','-N','','-f',str(pem)],check=True)
+        key_type, blob = pem.with_suffix('.pub').read_text().split()[:2]
+        real_run = subprocess.run
+        calls = []
+
+        def run(args, **kwargs):
+            calls.append(args)
+            if args[0] == '/stub/ssh-keyscan':
+                return subprocess.CompletedProcess(args, 0, f'vps.example.com {key_type} {blob}\n# warning\n', '')
+            return real_run(args, **kwargs)
+
+        with patch.object(n, 'program', side_effect=lambda name: '/stub/ssh-keyscan' if name == 'ssh-keyscan' else shutil.which(name)), \
+             patch.object(n.subprocess, 'run', side_effect=run):
+            records = n.scan_host_keys('vps.example.com')
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]['fingerprint'], n.key_fingerprint(key_type, blob))
+        self.assertTrue(any(Path(call[0]).name == 'ssh-keygen' and call[1:3] == ['-E', 'sha256'] for call in calls))
+        self.assertEqual(calls[0], ['/stub/ssh-keyscan', '-T', '10', '-p', '22', 'vps.example.com'])
+
+    def test_route_following_dns_preserves_ip_or_hostname_proxy_bootstrap(self):
+        payload = (n.SKILL/'scripts/setup-vps.sh').read_text(encoding='utf-8')
+        for home_host in ['203.0.113.10', 'proxy.example.net']:
+            conf = {**self.config(), 'home_host':home_host}
+            n.validate_config(conf)
+            self.assertIn(f'export HOME_HOST={home_host}\n', n.exports(conf))
+        self.assertIn('"address": e["HOME_HOST"]', payload)
+        self.assertIn('"servers": ["https://1.1.1.1/dns-query"]', payload)
+        self.assertNotIn('https+local://1.1.1.1/dns-query', payload)
+
+    def test_server_snapshot_is_fixed_sanitized_and_classifies_conflicts(self):
+        self.assertNotIn('cat "$path"', n.SERVER_SNAPSHOT)
+        bash = self.bash_program()
+        syntax = subprocess.run([bash, '-n'], input=n.SERVER_SNAPSHOT, text=True, capture_output=True)
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
+        first = {
+            'CC_PORT_443':'free','CC_PORT_8443':'free','CC_XRAY_UNIT':'absent','CC_SUB_UNIT':'absent',
+            'CC_NFTABLES_UNIT':'absent','CC_STATE_FILE':'absent','CC_UFW':'inactive',
+            'CC_SSH_DROPIN':'absent','CC_SUB_UNIT_FILE':'absent','CC_SUB_HARDENING':'absent',
+            'CC_XRAY_CONFIG':'absent','CC_SUB_DIR':'absent',
+        }
+        output = ''.join(f'{key}={value}\n' for key,value in first.items())
+        parsed = n.parse_server_snapshot(output)
+        self.assertEqual(n.classify_server_snapshot(parsed), 'first-deploy')
+        rerun = {**first,'CC_STATE_FILE':'managed','CC_XRAY_UNIT':'active',
+                 'CC_PORT_443':'ccbaga','CC_PORT_8443':'ccbaga','CC_SUB_UNIT':'active',
+                 'CC_NFTABLES_UNIT':'inactive','CC_UFW':'active',
+                 'CC_SSH_DROPIN':'managed','CC_SUB_UNIT_FILE':'managed','CC_SUB_HARDENING':'managed',
+                 'CC_XRAY_CONFIG':'present','CC_SUB_DIR':'present'}
+        self.assertEqual(n.classify_server_snapshot(rerun), 'same-product-rerun')
+        for unit in ['CC_XRAY_UNIT', 'CC_SUB_UNIT']:
+            self.assertEqual(n.classify_server_snapshot({**rerun, unit:'unknown'}), 'other-service-conflict')
+        conflict = {**first,'CC_PORT_443':'other'}
+        self.assertEqual(n.classify_server_snapshot(conflict), 'other-service-conflict')
+        firewall_conflict = {**first,'CC_UFW':'active'}
+        self.assertEqual(n.classify_server_snapshot(firewall_conflict), 'other-service-conflict')
+        ssh_conflict = {**first,'CC_SSH_DROPIN':'other'}
+        self.assertEqual(n.classify_server_snapshot(ssh_conflict), 'other-service-conflict')
+        legacy = {**first,'CC_STATE_FILE':'legacy-unverified','CC_XRAY_CONFIG':'present'}
+        self.assertEqual(n.classify_server_snapshot(legacy), 'other-service-conflict')
+        with self.assertRaises(ValueError):
+            n.parse_server_snapshot(output + 'CC_PASSWORD=do-not-return\n')
+
+    def snapshot_function(self, name):
+        return name + '() {' + n.SERVER_SNAPSHOT.split(name + '() {', 1)[1].split('\n}\n', 1)[0] + '\n}\n'
+
+    def test_server_unit_read_failure_and_transition_are_not_absence(self):
+        mock = '''systemctl() {
+          if [ "$4" = LoadState ]; then value="$TEST_UNIT_LOAD"; else value="$TEST_UNIT_ACTIVE"; fi
+          [ "$value" != FAIL ] || return 1
+          printf '%s\\n' "$value"
+        }\n'''
+        script = mock + self.snapshot_function('unit_state') + 'unit_state xray.service'
+        for load, active, expected in [
+            ('FAIL', '', 'unknown'), ('not-found', '', 'absent'),
+            ('loaded', 'active', 'active'), ('loaded', 'inactive', 'inactive'),
+            ('loaded', 'failed', 'failed'), ('loaded', 'FAIL', 'unknown'),
+            ('loaded', 'activating', 'unknown'), ('loaded', 'deactivating', 'unknown'),
+            ('bad-setting', 'active', 'unknown'),
+        ]:
+            result = subprocess.run([self.bash_program(), '-c', script], text=True, capture_output=True,
+                env={**os.environ, 'TEST_UNIT_LOAD':load, 'TEST_UNIT_ACTIVE':active}, check=True)
+            self.assertEqual(result.stdout, expected)
+
+    def test_port_read_failure_is_not_a_free_port(self):
+        script = 'ss() { return 1; };\n' + self.snapshot_function('port_owner') + 'port_owner 443 xray.service'
+        result = subprocess.run([self.bash_program(), '-c', script], text=True, capture_output=True, check=True)
+        self.assertEqual(result.stdout, 'unknown')
+
+    def test_firewall_read_failure_is_not_inactive(self):
+        script = "ufw() { printf 'Status: inactive\\n'; return 1; };\n" + self.snapshot_function('ufw_state') + 'ufw_state'
+        result = subprocess.run([self.bash_program(), '-c', script], text=True, capture_output=True, check=True)
+        self.assertEqual(result.stdout, 'unknown')
 
     def bash_program(self):
         if os.name != 'nt':
@@ -115,6 +280,9 @@ class NetworkTests(unittest.TestCase):
         args = n.ssh_args(conf,Path('/tmp/key'),self.root/'connection.json')
         self.assertNotIn(conf['home_pass'],' '.join(args))
         self.assertIn('StrictHostKeyChecking=yes',args)
+        self.assertIn('GlobalKnownHostsFile=' + os.devnull,args)
+        self.assertIn('known_hosts.pinned', ' '.join(args))
+        self.assertNotIn('accept-new',args)
         self.assertIn('IdentityAgent=none',args)
         curl = n.curl_config(conf)
         self.assertIn(json.dumps(conf['home_user']+':'+conf['home_pass']),curl)

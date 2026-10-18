@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # [INPUT]: 本机 0600 JSON、完整三文件密钥、OpenSSH/curl 和本 Skill UTF-8 部署脚本及相邻 Windows 原生边界。
-# [OUTPUT]: 分阶段密钥/连接/出口核验、显式部署、私密订阅文件与 TUN 实测。
-# [POS]: Skill 的标准库执行层；AI 收集资料后通过标准输入建私密配置；秘密不进入 argv/公开日志，失败不报告部署成功。
+# [OUTPUT]: 两阶段 host-key 固定、脱敏服务器冲突快照、分阶段出口核验、显式部署与私密订阅文件。
+# [POS]: Skill 的标准库执行层；AI 收集资料后通过标准输入建私密配置；秘密不进入 argv/公开日志，首次 SSH 前要求供应商指纹核对。
 # [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 import argparse
 import base64
@@ -30,9 +30,9 @@ DEFAULT = Path.home() / '.config/ccbaga-network/connection.json'
 def program(name):
     if os.name == 'nt':
         base = Path(os.environ.get('SystemRoot', r'C:\Windows'))
-        path = base/'System32/OpenSSH'/f'{name}.exe' if name in ['ssh','ssh-keygen'] else base/'System32'/f'{name}.exe'
+        path = base/'System32/OpenSSH'/f'{name}.exe' if name in ['ssh','ssh-keygen','ssh-keyscan'] else base/'System32'/f'{name}.exe'
         if path.is_file(): return str(path)
-        if name in ['ssh','ssh-keygen']: raise ValueError('Enable Windows OpenSSH Client first; the AI can handle prerequisites after approval')
+        if name in ['ssh','ssh-keygen','ssh-keyscan']: raise ValueError('Enable Windows OpenSSH Client with ssh-keyscan first; the AI can handle prerequisites after approval')
     found = shutil.which(name)
     if not found: raise ValueError(f'Install local {name} first')
     return found
@@ -148,16 +148,124 @@ class Key:
         self.temp.cleanup()
 
 
-def ssh_args(conf, key, config_path, accept_new=False):
-    hosts = Path(config_path).expanduser().absolute().parent / 'known_hosts'
+def ssh_args(conf, key, config_path):
+    hosts = Path(config_path).expanduser().absolute().parent / 'known_hosts.pinned'
     if hosts.is_symlink():
         raise ValueError('Refusing linked known_hosts')
     return [program('ssh'), '-F', os.devnull, '-T', '-p', '22', '-l', 'root',
             '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'IdentityAgent=none',
             '-o', 'PreferredAuthentications=publickey', '-o', 'PasswordAuthentication=no',
-            '-o', 'KbdInteractiveAuthentication=no', '-o', 'StrictHostKeyChecking=' + ('accept-new' if accept_new else 'yes'),
+            '-o', 'KbdInteractiveAuthentication=no', '-o', 'StrictHostKeyChecking=yes',
+            '-o', 'GlobalKnownHostsFile=' + os.devnull,
             '-o', 'UserKnownHostsFile="' + hosts.as_posix() + '"', '-o', 'ConnectTimeout=15',
             '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3', '-i', str(key), conf['vps']]
+
+
+def assert_private_directory(path):
+    path = Path(path)
+    if path.is_symlink() or (os.name == 'nt' and path.is_junction()) or not path.is_dir():
+        raise ValueError('Private connection directory must be a regular directory')
+    if os.name == 'nt':
+        win.assert_private(path)
+        return
+    st = path.stat()
+    if st.st_uid != os.getuid() or st.st_mode & 0o077:
+        raise ValueError('Private connection directory must be owned by you and mode 0700')
+
+
+def key_fingerprint(key_type, key_blob):
+    with tempfile.TemporaryDirectory(prefix='ccbaga-hostkey-') as directory:
+        public_key = Path(directory) / 'host.pub'
+        public_key.write_text(f'{key_type} {key_blob}\n', encoding='ascii')
+        result = subprocess.run([program('ssh-keygen'), '-E', 'sha256', '-lf', str(public_key)],
+                                capture_output=True, text=True, timeout=10)
+    match = re.search(r'\bSHA256:[A-Za-z0-9+/]+\b', result.stdout)
+    if result.returncode or not match:
+        raise ValueError('OpenSSH could not fingerprint a scanned host key')
+    return match.group(0)
+
+
+def scan_host_keys(host):
+    result = subprocess.run([program('ssh-keyscan'), '-T', '10', '-p', '22', host],
+                            capture_output=True, text=True, timeout=20)
+    records = []
+    seen = set()
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 3 or fields[0].startswith('#'):
+            continue
+        fingerprint = key_fingerprint(fields[1], fields[2])
+        identity = (fields[0], fields[1], fields[2])
+        if identity not in seen:
+            records.append({'host': fields[0], 'type': fields[1], 'blob': fields[2], 'fingerprint': fingerprint})
+            seen.add(identity)
+    if result.returncode and not records:
+        raise ValueError('Could not scan an SSH host key; check the VPS address and SSH port 22')
+    if not records:
+        raise ValueError('No SSH host key was returned; stop before connecting')
+    return records
+
+
+def pinned_host_keys(path):
+    path = Path(path)
+    assert_private_directory(path.parent)
+    if path.is_symlink() or not path.is_file():
+        raise ValueError('Pinned host-key file is missing or linked')
+    if os.name == 'nt':
+        win.assert_private(path)
+    with path.open(encoding='ascii') as stream:
+        st = os.fstat(stream.fileno())
+        if st.st_size > 4096 or (os.name != 'nt' and (st.st_uid != os.getuid() or st.st_mode & 0o077)):
+            raise ValueError('Pinned host-key file must be owned by you, private, and under 4 KiB')
+        records = []
+        for line in stream:
+            fields = line.split()
+            if len(fields) != 3:
+                raise ValueError('Pinned host-key file is malformed; it was left unchanged')
+            records.append({'host': fields[0], 'type': fields[1], 'blob': fields[2],
+                            'fingerprint': key_fingerprint(fields[1], fields[2])})
+    if len(records) != 1:
+        raise ValueError('Pinned host-key file must contain exactly one verified key')
+    return records
+
+
+def pin_host_key(conf, config_path, expected_fingerprint, candidates=None):
+    if not isinstance(expected_fingerprint, str) or not expected_fingerprint:
+        raise ValueError('Supply the exact SHA256 fingerprint verified against the VPS provider console')
+    candidates = scan_host_keys(conf['vps']) if candidates is None else candidates
+    matching = [key for key in candidates if key['fingerprint'] == expected_fingerprint]
+    if not matching:
+        raise ValueError('The provider fingerprint did not match a scanned host key; no pin was written')
+    target = Path(config_path).expanduser().absolute().parent / 'known_hosts.pinned'
+    assert_private_directory(target.parent)
+    if target.exists():
+        existing = pinned_host_keys(target)
+        if existing[0]['fingerprint'] != expected_fingerprint:
+            raise ValueError('An existing host-key pin differs; it was preserved. Use a fresh private config directory after provider revalidation')
+        return existing[0]
+    chosen = matching[0]
+    private_write(target, f"{chosen['host']} {chosen['type']} {chosen['blob']}\n")
+    return chosen
+
+
+def identity(conf, key, config_path, expected_fingerprint=None):
+    target = Path(config_path).expanduser().absolute().parent / 'known_hosts.pinned'
+    if target.exists():
+        pinned = pinned_host_keys(target)
+        if expected_fingerprint and expected_fingerprint != pinned[0]['fingerprint']:
+            raise ValueError('The requested fingerprint differs from the existing pin; it was preserved')
+    elif expected_fingerprint:
+        pinned = [pin_host_key(conf, config_path, expected_fingerprint)]
+    else:
+        candidates = scan_host_keys(conf['vps'])
+        print('SSH_HOST_KEY_FINGERPRINTS=' + ', '.join(
+            f"{key['fingerprint']} ({key['type']})" for key in candidates))
+        print('No SSH authentication or server command was sent. Compare one fingerprint with the VPS provider console, then rerun identity with --host-key-fingerprint.')
+        return
+    output = execute(ssh_args(conf, key, config_path) + ['bash -s'],
+                     'set -e; test "$(id -u)" = 0; . /etc/os-release; test "$ID" = debian; printf "ROOT=verified; OS=%s\\n" "$VERSION_ID"')
+    print(output.strip())
+    print('SSH_HOST_KEY_VERIFIED=' + pinned[0]['fingerprint'])
 
 
 def execute(command, payload='', timeout=30):
@@ -203,7 +311,8 @@ def exports(conf):
     pairs = {'HOME_HOST': conf['home_host'], 'HOME_PORT': str(conf['home_port']),
              'HOME_USER': conf['home_user'], 'HOME_PASS': conf['home_pass'],
              'EXPECTED_EXIT_IP': conf['expected_ip'], 'SERVER_ADDR': conf['vps'], 'SSH_PORT': '22',
-             'DIRECT_DOMAINS': ' ', 'NODE_NAME': 'CCBaga-Home'}
+             'DIRECT_DOMAINS': ' ', 'NODE_NAME': 'CCBaga-Home',
+             'CCBAGA_PREFLIGHT_APPROVED': '1'}
     return 'set -euo pipefail\n' + ''.join(f'export {key}={shlex.quote(value)}\n' for key, value in pairs.items())
 
 
@@ -234,8 +343,178 @@ REMOTE
 '''
 
 
+SERVER_SNAPSHOT = r'''set -eu
+test "$(id -u)" = 0
+. /etc/os-release
+test "$ID" = debian
+case "$VERSION_ID" in 12|13) ;; *) exit 1;; esac
+unit_state() {
+  local unit="$1" load state
+  load="$(systemctl show "$unit" -p LoadState --value 2>/dev/null)" || { printf 'unknown'; return; }
+  [[ "$load" != not-found ]] || { printf 'absent'; return; }
+  [[ "$load" == loaded ]] || { printf 'unknown'; return; }
+  state="$(systemctl show "$unit" -p ActiveState --value 2>/dev/null)" || { printf 'unknown'; return; }
+  case "$state" in active|inactive|failed) printf '%s' "$state" ;; *) printf 'unknown' ;; esac
+}
+unit_pid() { systemctl show "$1" -p MainPID --value 2>/dev/null || true; }
+port_owner() {
+  local port="$1" unit="$2" listeners pid count line
+  command -v ss >/dev/null || { printf 'unknown'; return; }
+  listeners="$(ss -H -lntp "sport = :${port}" 2>/dev/null)" || { printf 'unknown'; return; }
+  [[ -n "$listeners" ]] || { printf 'free'; return; }
+  count="$(printf '%s\n' "$listeners" | wc -l | tr -d '[:space:]')"
+  [[ "$count" -le 16 ]] || { printf 'unknown'; return; }
+  pid="$(unit_pid "$unit")"
+  [[ -n "$pid" && "$pid" != 0 ]] || { printf 'other'; return; }
+  while IFS= read -r line; do
+    [[ "$line" == *"pid=${pid},"* ]] || { printf 'other'; return; }
+  done <<< "$listeners"
+  printf 'ccbaga'
+}
+state_kind() {
+  local path=/etc/xray-setup.env owner mode size
+  [[ ! -L "$path" ]] || { printf 'unsafe'; return; }
+  [[ -e "$path" ]] || { printf 'absent'; return; }
+  [[ ! -L "$path" && -f "$path" ]] || { printf 'unsafe'; return; }
+  owner="$(stat -c '%u' "$path" 2>/dev/null || true)"
+  mode="$(stat -c '%a' "$path" 2>/dev/null || true)"
+  size="$(stat -c '%s' "$path" 2>/dev/null || true)"
+  [[ "$owner" == 0 && "$mode" == 600 && "$size" =~ ^[0-9]+$ && "$size" -le 4096 ]] || { printf 'unsafe'; return; }
+  if grep -qx 'CCBAGA_NETWORK_MANAGED=1' "$path"; then
+    printf 'managed'
+  elif grep -q '^XRAY_UUID=' "$path" && grep -q '^SUB_TOKEN=' "$path"; then
+    printf 'legacy-unverified'
+  else
+    printf 'unrecognized'
+  fi
+}
+fixed_config_kind() {
+  local path="$1" parent="$2" marker="$3" size
+  [[ ! -L "$parent" && ! -L "$path" ]] || { printf 'unsafe'; return; }
+  [[ -e "$path" ]] || { printf 'absent'; return; }
+  [[ -f "$path" ]] || { printf 'unsafe'; return; }
+  size="$(stat -c '%s' "$path" 2>/dev/null || true)"
+  [[ "$size" =~ ^[0-9]+$ && "$size" -le 65536 ]] || { printf 'unsafe'; return; }
+  if grep -qxF -- "$marker" "$path"; then printf 'managed'; else printf 'other'; fi
+}
+ufw_state() {
+  command -v ufw >/dev/null || { printf 'absent'; return; }
+  local status
+  status="$(LC_ALL=C ufw status 2>/dev/null)" || { printf 'unknown'; return; }
+  status="${status%%$'\n'*}"
+  case "$status" in 'Status: active') printf 'active' ;; 'Status: inactive') printf 'inactive' ;; *) printf 'unknown' ;; esac
+}
+xray_unit="$(unit_state xray.service)"
+sub_unit="$(unit_state sub.service)"
+nftables_unit="$(unit_state nftables.service)"
+port443="$(port_owner 443 xray.service)"
+port8443="$(port_owner 8443 sub.service)"
+state="$(state_kind)"
+ufw="$(ufw_state)"
+ssh_dropin="$(fixed_config_kind /etc/ssh/sshd_config.d/01-hardening.conf /etc/ssh/sshd_config.d '# CCBaga Network managed SSH hardening')"
+sub_unit_file="$(fixed_config_kind /etc/systemd/system/sub.service /etc/systemd/system '# CCBaga Network managed subscription service')"
+sub_hardening="$(fixed_config_kind /etc/systemd/system/sub.service.d/hardening.conf /etc/systemd/system/sub.service.d '# CCBaga Network managed subscription hardening')"
+if [[ -L /usr/local || -L /usr/local/etc || -L /usr/local/etc/xray || -L /usr/local/etc/xray/config.json ]]; then xray_config=unsafe
+elif [[ -f /usr/local/etc/xray/config.json ]]; then xray_config=present
+else xray_config=absent; fi
+if [[ -L /srv || -L /srv/sub ]]; then sub_dir=unsafe
+elif [[ -d /srv/sub ]]; then sub_dir=present
+else sub_dir=absent; fi
+printf 'CC_PORT_443=%s\n' "$port443"
+printf 'CC_PORT_8443=%s\n' "$port8443"
+printf 'CC_XRAY_UNIT=%s\n' "$xray_unit"
+printf 'CC_SUB_UNIT=%s\n' "$sub_unit"
+printf 'CC_NFTABLES_UNIT=%s\n' "$nftables_unit"
+printf 'CC_STATE_FILE=%s\n' "$state"
+printf 'CC_UFW=%s\n' "$ufw"
+printf 'CC_SSH_DROPIN=%s\n' "$ssh_dropin"
+printf 'CC_SUB_UNIT_FILE=%s\n' "$sub_unit_file"
+printf 'CC_SUB_HARDENING=%s\n' "$sub_hardening"
+printf 'CC_XRAY_CONFIG=%s\n' "$xray_config"
+printf 'CC_SUB_DIR=%s\n' "$sub_dir"
+'''
+
+SNAPSHOT_VALUES = {
+    'CC_PORT_443': {'free', 'ccbaga', 'other', 'unknown'},
+    'CC_PORT_8443': {'free', 'ccbaga', 'other', 'unknown'},
+    'CC_XRAY_UNIT': {'absent', 'active', 'inactive', 'failed', 'unknown'},
+    'CC_SUB_UNIT': {'absent', 'active', 'inactive', 'failed', 'unknown'},
+    'CC_NFTABLES_UNIT': {'absent', 'active', 'inactive', 'failed', 'unknown'},
+    'CC_STATE_FILE': {'absent', 'managed', 'legacy-unverified', 'unrecognized', 'unsafe'},
+    'CC_UFW': {'absent', 'active', 'inactive', 'unknown'},
+    'CC_SSH_DROPIN': {'absent', 'managed', 'other', 'unsafe'},
+    'CC_SUB_UNIT_FILE': {'absent', 'managed', 'other', 'unsafe'},
+    'CC_SUB_HARDENING': {'absent', 'managed', 'other', 'unsafe'},
+    'CC_XRAY_CONFIG': {'absent', 'present', 'unsafe'},
+    'CC_SUB_DIR': {'absent', 'present', 'unsafe'},
+}
+
+
+def parse_server_snapshot(output):
+    values = {}
+    for line in output.splitlines():
+        if not line.startswith('CC_'):
+            continue
+        key, separator, value = line.partition('=')
+        if not separator or key not in SNAPSHOT_VALUES or key in values or value not in SNAPSHOT_VALUES[key]:
+            raise ValueError('Server preflight returned an invalid or unexpected status')
+        values[key] = value
+    if set(values) != set(SNAPSHOT_VALUES):
+        raise ValueError('Server preflight returned an incomplete status snapshot')
+    return values
+
+
+def classify_server_snapshot(values):
+    ports = (values['CC_PORT_443'], values['CC_PORT_8443'])
+    if values['CC_XRAY_UNIT'] == 'unknown' or values['CC_SUB_UNIT'] == 'unknown':
+        return 'other-service-conflict'
+    safe_managed_paths = values['CC_XRAY_CONFIG'] != 'unsafe' and values['CC_SUB_DIR'] != 'unsafe'
+    safe_managed_configs = all(values[key] in {'absent', 'managed'} for key in
+                               ('CC_SSH_DROPIN', 'CC_SUB_UNIT_FILE', 'CC_SUB_HARDENING'))
+    if (values['CC_STATE_FILE'] == 'managed' and safe_managed_paths and safe_managed_configs
+            and values['CC_NFTABLES_UNIT'] in {'absent', 'inactive'}
+            and values['CC_UFW'] != 'unknown'
+            and all(port in {'free', 'ccbaga'} for port in ports)):
+        return 'same-product-rerun'
+    if (values['CC_STATE_FILE'] == 'absent'
+            and values['CC_XRAY_UNIT'] == 'absent'
+            and values['CC_SUB_UNIT'] == 'absent'
+            and values['CC_NFTABLES_UNIT'] in {'absent', 'inactive'}
+            and values['CC_UFW'] in {'absent', 'inactive'}
+            and all(values[key] == 'absent' for key in
+                    ('CC_SSH_DROPIN', 'CC_SUB_UNIT_FILE', 'CC_SUB_HARDENING'))
+            and values['CC_XRAY_CONFIG'] == 'absent'
+            and values['CC_SUB_DIR'] == 'absent'
+            and ports == ('free', 'free')):
+        return 'first-deploy'
+    return 'other-service-conflict'
+
+
+def server_snapshot(conf, key, config_path):
+    output = execute(ssh_args(conf, key, config_path) + ['bash -s'], SERVER_SNAPSHOT, timeout=30)
+    values = parse_server_snapshot(output)
+    values['CC_SERVER_MODE'] = classify_server_snapshot(values)
+    return values
+
+
 def check(conf, key, config_path):
     for name in ['ssh', 'ssh-keygen', 'curl']: program(name)
+    snapshot = server_snapshot(conf, key, config_path)
+    print('SERVER_PREFLIGHT=' + snapshot['CC_SERVER_MODE']
+          + ';443=' + snapshot['CC_PORT_443']
+          + ';8443=' + snapshot['CC_PORT_8443']
+          + ';xray=' + snapshot['CC_XRAY_UNIT']
+          + ';sub=' + snapshot['CC_SUB_UNIT']
+          + ';nftables=' + snapshot['CC_NFTABLES_UNIT']
+          + ';ufw=' + snapshot['CC_UFW']
+          + ';ssh_dropin=' + snapshot['CC_SSH_DROPIN']
+          + ';sub_unit_file=' + snapshot['CC_SUB_UNIT_FILE']
+          + ';sub_hardening=' + snapshot['CC_SUB_HARDENING']
+          + ';state=' + snapshot['CC_STATE_FILE']
+          + ';xray_config=' + snapshot['CC_XRAY_CONFIG']
+          + ';sub_dir=' + snapshot['CC_SUB_DIR'])
+    if snapshot['CC_SERVER_MODE'] == 'other-service-conflict':
+        raise RuntimeError('Existing or unverified server state conflicts with deployment; no changes made. Review the sanitized preflight before proceeding.')
     local = subprocess.run([program('curl'), '--silent', '--show-error', '--fail', '--max-time', '15', '--noproxy', '', '--config', '-'],
                            input=curl_config(conf), text=True, encoding='utf-8', capture_output=True)
     print('LOCAL_SOCKS=' + ('verified' if local.returncode == 0 and local.stdout.strip() == conf['expected_ip'] else 'unverified; checking from VPS'))
@@ -305,6 +584,7 @@ def main():
     parser.add_argument('--config', default=str(DEFAULT))
     parser.add_argument('--pem'); parser.add_argument('--ppk'); parser.add_argument('--pub')
     parser.add_argument('--confirm', action='store_true', help='Use only after reviewing and approving remote changes')
+    parser.add_argument('--host-key-fingerprint', help='Pin only after matching the SHA256 fingerprint in the VPS provider console')
     args = parser.parse_args()
     if args.action == 'links':
         for name in ['dmit', 'webshare']: print(name + ': ' + provider_url(name))
@@ -314,6 +594,8 @@ def main():
     if args.action == 'keys':
         with Key(vars(args)): print('PEM/PPK/PUB pairing verified; temporary private key removed on exit')
         return
+    if args.host_key_fingerprint and args.action != 'identity':
+        raise ValueError('--host-key-fingerprint is valid only with identity')
     conf = read_config(args.config)
     if args.action == 'tun-check':
         result = execute([program('curl'), '--silent', '--fail', '--max-time', '20', '--proxy', '', '--noproxy', '*', 'https://api.ipify.org'])
@@ -322,13 +604,16 @@ def main():
         print('TUN_EXIT=verified (CLI path only; also verify browser/DNS/WebRTC)'); return
     if args.action == 'deploy' and not args.confirm:
         raise ValueError('Review the actual VPS and approve changes before passing --confirm')
+    if args.action == 'identity':
+        with Key(conf) as key:
+            identity(conf, key, args.config, args.host_key_fingerprint)
+        return
+    if args.action in ['check', 'deploy', 'fetch']:
+        pin_path = Path(args.config).expanduser().absolute().parent / 'known_hosts.pinned'
+        if not pin_path.exists():
+            raise ValueError('No verified SSH host-key pin. Run identity, compare the fingerprint with the VPS provider console, then pin it before continuing.')
+        pinned_host_keys(pin_path)
     with Key(conf) as key:
-        if args.action == 'identity':
-            output = execute(ssh_args(conf,key,args.config,accept_new=True) + ['bash -s'],
-                             'set -e; test "$(id -u)" = 0; . /etc/os-release; test "$ID" = debian; printf "ROOT=verified; OS=%s\\n" "$VERSION_ID"')
-            print(output.strip())
-            result = subprocess.run([program('ssh-keygen'),'-l','-f',str(Path(args.config).expanduser().parent/'known_hosts')],capture_output=True,text=True,check=True)
-            print(result.stdout.strip()); return
         if args.action == 'fetch':
             fetch(conf,key,args.config); return
         check(conf, key, args.config)

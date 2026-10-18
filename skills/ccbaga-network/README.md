@@ -83,16 +83,16 @@ python3 scripts/test_network.py            # offline; no VPS or real credentials
 python3 scripts/network.py links           # purchase entrances
 python3 scripts/network.py keys --pem '/path/id_rsa.pem' --ppk '/path/id_rsa.ppk' --pub '/path/id_rsa.pub'
 python3 scripts/network.py configure       # AI sends validated connection JSON on stdin; no terminal prompts
-python3 scripts/network.py identity        # first SSH identity, no proxy secrets sent
+python3 scripts/network.py identity        # fingerprint scan only; no SSH authentication
 python3 scripts/network.py check           # local + read-only VPS/exit validation
 python3 scripts/network.py deploy --confirm # ONLY after specific server-change approval
 python3 scripts/network.py fetch           # fresh SSH session, private local YAML
 python3 scripts/network.py tun-check       # actual system exit, bypass proxy env
 ```
 
-`configure` accepts all nine fields on standard input: `vps`, `pem`, `ppk`, `pub`, `home_host`, integer `home_port`, `home_user`, `home_pass`, `expected_ip`. It validates before writing, refuses overwrites and Git/skill destinations, and never prints credentials. `--config /absolute/private/connection.json` selects another private config. SSH is root:22 with the matching PEM; password and Agent authentication are disabled. First identity uses TOFU; compare the provider fingerprint before continuing. Later commands reject unknown/changed host keys.
+`configure` accepts all nine fields on standard input: `vps`, `pem`, `ppk`, `pub`, `home_host`, integer `home_port`, `home_user`, `home_pass`, `expected_ip`. It validates before writing, refuses overwrites and Git/skill destinations, and never prints credentials. `--config /absolute/private/connection.json` selects another private config. SSH is root:22 with the matching PEM; password and Agent authentication are disabled. First run `identity` to scan candidate host fingerprints without authenticating or running a server command. After the user matches one against the provider console, rerun `identity --host-key-fingerprint SHA256:...` to pin the exact key in `known_hosts.pinned`; the helper leaves any existing `known_hosts` untouched. Later commands use strict checking and stop on changed or missing pins.
 
-Deployment targets an authorized Debian 12/13 server. It changes system packages, SSH/firewall and Xray services; failures may leave partial changes. The bundled server script keeps root-owned identity state and timestamped backups. It is not a universal installer for existing production servers.
+Deployment targets an authorized Debian 12/13 server. A read-only, fixed-field snapshot classifies a clean first deployment, a marker-backed CCBaga rerun, or an existing/unverified service conflict before any change. The current helper exposes its tokenized subscription on public plain HTTP port 8443; approval must explicitly cover that transport. Deployment changes system packages, SSH/firewall and Xray services; failures may leave partial changes. The bundled server script keeps root-owned identity state and timestamped backups. It is not a universal installer for existing production servers.
 
 ## Subscription and TUN
 
