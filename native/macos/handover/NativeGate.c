@@ -191,21 +191,27 @@ static int adopt_pending_locked(ng_gate *g, uint64_t generation) {
     return rc;
 }
 
-static int connect_upstream(ng_gate *g, uint64_t generation) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-    if (nonblock(fd) < 0) { close(fd); return -1; }
+// Shared with the offline seam so tests exercise the production registration
+// critical section without opening the fixed loopback upstream port.
+static int register_pending_upstream(ng_gate *g, uint64_t generation, int fd) {
     pthread_mutex_lock(&g->mu);
     if (!live_locked(g) || generation != g->pending_generation ||
         g->pending_client < 0 || g->pending_upstream >= 0) {
         pthread_mutex_unlock(&g->mu);
-        close(fd);
-        return -1;
+        return EPERM;
     }
     // Publish before connect(2), allowing lock/expiry to interrupt the
     // in-flight socket while it is still outside the relay-pair table.
     g->pending_upstream = fd;
     pthread_mutex_unlock(&g->mu);
+    return 0;
+}
+
+static int connect_upstream(ng_gate *g, uint64_t generation) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    if (nonblock(fd) < 0) { close(fd); return -1; }
+    if (register_pending_upstream(g, generation, fd) != 0) { close(fd); return -1; }
     struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons(7896)};
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     int rc = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
@@ -395,22 +401,13 @@ int ng_test_begin_pending(ng_gate *g, int client_fd, uint64_t *generation) {
     pthread_mutex_unlock(&g->mu);
     return accepted ? 0 : EPERM;
 }
-int ng_test_complete_pending(ng_gate *g, uint64_t generation, int upstream_fd) {
+int ng_test_register_pending_upstream(ng_gate *g, uint64_t generation, int upstream_fd) {
     if (!g || !generation || upstream_fd < 0) return EINVAL;
-    pthread_mutex_lock(&g->mu);
-    if (!live_locked(g) || generation != g->generation ||
-        generation != g->pending_generation || g->pending_client < 0 ||
-        g->pending_upstream >= 0) {
-        shutdown(upstream_fd, SHUT_RDWR); close(upstream_fd);
-        if (g->pending_client >= 0 && g->pending_generation == generation)
-            close_pending_locked(g);
-        pthread_mutex_unlock(&g->mu);
-        return EPERM;
-    }
-    g->pending_upstream = upstream_fd;
-    int rc = adopt_pending_locked(g, generation);
-    pthread_mutex_unlock(&g->mu);
-    return rc;
+    return register_pending_upstream(g, generation, upstream_fd);
+}
+int ng_test_adopt_pending(ng_gate *g, uint64_t generation) {
+    if (!g || !generation) return EINVAL;
+    return adopt_pending(g, generation);
 }
 void ng_test_enable(ng_gate *g) {
     if (!g) return;

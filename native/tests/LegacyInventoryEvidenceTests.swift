@@ -97,6 +97,11 @@ final class Process {
         let exitedAfterFailedPS = try supervisor.isQuiescent()
         precondition(exitedAfterFailedPS)
         precondition(fixtureCount(0)==2 && fixtureCount(2)==0 && Process.calls==1)
+        // Same PID/UID/birth with zombie=1 is a confirmed exit after ps fails.
+        fixtureSet(27); Process.mode=1; Process.calls=0
+        let zombieAfterFailedPS = try supervisor.isQuiescent()
+        precondition(zombieAfterFailedPS)
+        precondition(fixtureCount(0)==2 && fixtureCount(2)==0 && Process.calls==1)
         for (scenario, identity) in [(24,Int32(0)), (25,Int32(EPERM)), (26,Int32(ESTALE))] {
             fixtureSet(Int32(scenario)); Process.mode=1; Process.calls=0
             do { _ = try supervisor.isQuiescent(); preconditionFailure("Expected preserved ps failure") }

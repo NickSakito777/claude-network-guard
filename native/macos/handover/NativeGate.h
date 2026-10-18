@@ -20,7 +20,8 @@ void ng_tick(ng_gate *gate);
 #ifdef NG_OFFLINE_TEST
 int ng_test_adopt_pair(ng_gate *gate, int client_fd, int upstream_fd);
 int ng_test_begin_pending(ng_gate *gate, int client_fd, uint64_t *generation);
-int ng_test_complete_pending(ng_gate *gate, uint64_t generation, int upstream_fd);
+int ng_test_register_pending_upstream(ng_gate *gate, uint64_t generation, int upstream_fd); // Takes ownership on success.
+int ng_test_adopt_pending(ng_gate *gate, uint64_t generation);
 void ng_test_enable(ng_gate *gate); // offline fixture only; never binds
 int ng_test_take_listener_fd(ng_gate *gate, int unix_fd); // owned Unix fixture FD
 #endif

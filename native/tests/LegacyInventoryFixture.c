@@ -24,13 +24,14 @@ int lg_process_status(pid_t pid, lg_status *out) {
     if (status_calls>1 && (scenario==3 || scenario==5 || scenario==8 || scenario==11 || scenario==14)) return ESRCH;
     memset(out,0,sizeof(*out)); out->pid=pid; out->uid=getuid(); out->birth_sec=1700000000; out->birth_usec=1;
     if (status_calls>1 && (scenario==20 || scenario==26)) out->birth_sec++;
+    if (status_calls>1 && scenario==27) out->zombie=1;
     return 0;
 }
 int lg_process_snapshot(pid_t pid, lg_process *out) {
     snapshot_calls++;
     if (scenario==3 || scenario==4) return ESRCH;
     if ((scenario>=5 && scenario<=8) || scenario==19 || scenario==20 ||
-        (scenario>=23 && scenario<=26)) return EACCES;
+        (scenario>=23 && scenario<=27)) return EACCES;
     if (scenario==9) return EPERM;
     if (scenario==13 && snapshot_calls>1) return EACCES;
     if ((scenario==14 || scenario==15) && snapshot_calls>1) return ESRCH;
