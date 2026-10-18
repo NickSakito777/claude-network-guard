@@ -1,23 +1,23 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "CCBaga-A",
+  "productName": "Guard",
   "version": "0.2.0",
-  "identifier": "ai.local.requirement-french",
+  "identifier": "local.fox.guard",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "bun run build && sh scripts/package-browser.sh",
+    "beforeBuildCommand": "bun run build",
     "frontendDist": "../dist"
   },
   "app": {
     "windows": [
       {
         "label": "main",
-        "title": "CCBaga-A",
+        "title": "Guard",
         "width": 1040,
         "height": 820,
-        "minWidth": 760,
-        "minHeight": 640,
+        "minWidth": 960,
+        "minHeight": 700,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "backgroundColor": "#FFFFFF"
@@ -28,7 +28,7 @@
     }
   },
   "bundle": {
-    "active": true,
+    "active": false,
     "icon": [
       "icons/icon.ico",
       "icons/icon.png",
@@ -41,13 +41,5 @@
       "../assets/ai-icons/LICENSE.lobehub.txt": "licenses/LICENSE.lobehub.txt"
     }
   },
-  "plugins": {
-    "updater": {
-      "endpoints": [
-        "https://github.com/liseami/CCBaga/releases/latest/download/latest.json"
-      ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJEQjVDMDk0RkU1ODBCQzUKUldURkMxaitsTUMxTFlYajNuTFBvK3EzeG5ubGpFK1VyZmZ6QnVJYnhERi9ta05sV0pRc2E3TXIK",
-      "requireSignedVersion": true
-    }
-  }
+  "plugins": {}
 }

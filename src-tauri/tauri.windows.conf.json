@@ -1,17 +1,17 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "build": {
-    "beforeBuildCommand": "bun run build && pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/package-browser.ps1"
+    "beforeBuildCommand": "bun run build"
   },
   "app": {
     "windows": [
       {
         "label": "main",
-        "title": "CCBaga-A",
+        "title": "Guard",
         "width": 1040,
         "height": 820,
-        "minWidth": 760,
-        "minHeight": 640,
+        "minWidth": 960,
+        "minHeight": 700,
         "decorations": true
       }
     ]
@@ -49,11 +49,5 @@
       }
     }
   },
-  "plugins": {
-    "updater": {
-      "windows": {
-        "installMode": "passive"
-      }
-    }
-  }
+  "plugins": {}
 }

@@ -3,11 +3,11 @@
     "windows": [
       {
         "label": "main",
-        "title": "CCBaga-A",
+        "title": "Guard",
         "width": 1040,
         "height": 820,
-        "minWidth": 760,
-        "minHeight": 640,
+        "minWidth": 960,
+        "minHeight": 700,
         "decorations": true
       }
     ]

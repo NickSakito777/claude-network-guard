@@ -1,0 +1,81 @@
+{
+  "description": "Reused source origins before Guard-specific adapter edits; old lab source is read-only",
+  "files": {
+    "README.md": {
+      "source": "integration/README.md",
+      "sha256": "c004ec83eb20cc4cd75177a2fa317188a28f3d8e1a99493d796fb14e95e87c24"
+    },
+    "native/NativeClock.swift": {
+      "source": "integration/native/NativeClock.swift",
+      "sha256": "98956560f2c3f272b34664ee620a6a7ca866dad2d2afb51d4f2182419d466b20"
+    },
+    "checks/NetworkEventPolicy.swift": {
+      "source": "integration/checks/NetworkEventPolicy.swift",
+      "sha256": "f7eeed5bd50d24e861b1a841de932f67246fcd72364309130e984d75ec05f6bb"
+    },
+    "checks/EnvironmentChecker.swift": {
+      "source": "integration/checks/EnvironmentChecker.swift",
+      "sha256": "4aa1b74340619c97d0531e2705002cb7d49a4249ad8cc797f950ebb708bf8588"
+    },
+    "checks/RootPortObserver.swift": {
+      "source": "integration/checks/RootPortObserver.swift",
+      "sha256": "ece6027d7ec1bb1c29060edd2278e76b99f883951790c03eb330d53b1b53fefb"
+    },
+    "checks/WiFiAssociationEventMonitor.swift": {
+      "source": "integration/checks/WiFiAssociationEventMonitor.swift",
+      "sha256": "cf21c4df66e991bd3507e638b50e0d4bcf599431f7c738ddaba18ab2aeaa9dc9"
+    },
+    "checks/ObserverIdentity.c": {
+      "source": "integration/checks/ObserverIdentity.c",
+      "sha256": "daf16fb5bc36114c9261e53c064364c6e58ca01b659baa3afbb89a3035bbf715"
+    },
+    "handover/LegacyProcess.h": {
+      "source": "integration/handover/LegacyProcess.h",
+      "sha256": "ba14bc3ea7c02d73bb5db798c13c38bb89f0b942e3649be6c38c3e79ec351034"
+    },
+    "handover/NativeGate.c": {
+      "source": "integration/handover/NativeGate.c",
+      "sha256": "67cda4d70bf2b41d42c2bde1670cd61b5cb4f911d61a968092cfd0ec31e23f96"
+    },
+    "handover/SwiftNativeGate.swift": {
+      "source": "integration/handover/SwiftNativeGate.swift",
+      "sha256": "9e5b2df2ed687a17c4f810327c0f3ba85ced7c45df820b71f5aa67c4a8fc1f79"
+    },
+    "handover/module.modulemap": {
+      "source": "integration/handover/module.modulemap",
+      "sha256": "d089c3641eb5bf549adc5b9b336b168bc5f334728a546748951b3e45e686e130"
+    },
+    "handover/LegacyApplicationSupervisor.swift": {
+      "source": "integration/handover/LegacyApplicationSupervisor.swift",
+      "sha256": "b0075c48cc89b8125e95dc52c5a9eb3aa21c26834366461ce3f241772476c12c"
+    },
+    "handover/NativeGate.h": {
+      "source": "integration/handover/NativeGate.h",
+      "sha256": "fc9445bd357c482cae5a5ba8a47e3ebc62c0e54e929892bef2ff23cb446d7656"
+    },
+    "handover/LegacyProcess.c": {
+      "source": "integration/handover/LegacyProcess.c",
+      "sha256": "554fc18905d5990bd9a59bd7dc4859cee00ae890e369408c48e8e531509815a1"
+    },
+    "controller/ProtectedFiles.swift": {
+      "source": "integration/controller/ProtectedFiles.swift",
+      "sha256": "6d1e01c7d5619055dc9c97590b08e018e616bfcd096f5688d7298f84be750901"
+    },
+    "lulu/LuLuManifest.swift": {
+      "source": "integration/lulu/LuLuManifest.swift",
+      "sha256": "4bc2f608f5027a9eb320750ed6cfb922f9b65b0bcdc7ca1326bb9fe6a1f6cae1"
+    },
+    "lulu/LuLuPolicy.swift": {
+      "source": "integration/lulu/LuLuPolicy.swift",
+      "sha256": "8fc9ca43963e77f21e3aa024572731528f086d12437cc61c9d5f11f71595bc0f"
+    },
+    "lulu/lulu_facts.py": {
+      "source": "integration/lulu/lulu_facts.py",
+      "sha256": "f0c3faefada067dde3529719dc94518bd59f6f2f52d92c0265a982897105044c"
+    },
+    "lulu/LuLuServices.swift": {
+      "source": "integration/lulu/LuLuServices.swift",
+      "sha256": "10bf8356a15ab2571f653c3f99d1cbfc810085924c9c1e4b9381b4ac35085518"
+    }
+  }
+}

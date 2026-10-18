@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "targets": [
+    {
+      "id": "claude_code",
+      "executable": "C:\\GuardCandidate\\claude-code.exe",
+      "arguments": ["--version"],
+      "workingDirectory": "C:\\GuardCandidate",
+      "imageSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "dedicatedSid": "S-1-5-21-1-2-3-1001",
+      "stdioPipes": false
+    },
+    {
+      "id": "mcp",
+      "executable": "C:\\GuardCandidate\\mcp-host.exe",
+      "arguments": ["--stdio"],
+      "workingDirectory": "C:\\GuardCandidate",
+      "imageSha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+      "dedicatedSid": "S-1-5-21-1-2-3-1001",
+      "stdioPipes": true
+    }
+  ]
+}

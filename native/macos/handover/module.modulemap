@@ -1,0 +1,4 @@
+module LegacyProcessShim {
+    header "LegacyProcess.h"
+    export *
+}

@@ -1,5 +1,5 @@
-// [INPUT]: macOS/Linux/Windows 平台边界、Tauri 生命周期、发布构建 custom-protocol 与清理、CLI 安装管理、浏览器、地区、系统、固定网络资源导航与独立界面语言命令及官方签名更新/重启插件。
-// [OUTPUT]: CCBaga-A窗口、托盘、SQLite 本地身份暂存/恢复和 CLI 卸载/重装、固定网络资源入口与随界面语言切换的托盘菜单，以及 CI 的固定启动阶段诊断。
+// [INPUT]: Platform boundaries, Tauri lifecycle, native Guard state and operation gates, identity/CLI/browser/system commands, and UI language.
+// [OUTPUT]: CCBaga-A window and tray, guarded native command registry, identity/CLI operations, fixed resource entry, and startup diagnostics.
 // [POS]: 应用编排层；不注册翻译快捷键，不读取翻译设置或 API 密钥。
 // [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
@@ -9,6 +9,15 @@ compile_error!("发布构建需要 custom-protocol；使用 tauri build 或 carg
 mod browser;
 mod claude_cli;
 mod cleaner;
+mod guard;
+mod guard_privacy;
+mod guard_privacy_readback;
+#[cfg(target_os = "macos")]
+mod guard_macos;
+#[cfg(any(target_os = "windows", test))]
+mod guard_windows;
+#[cfg(any(target_os = "windows", test))]
+mod guard_windows_launch;
 mod identities;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -72,8 +81,6 @@ pub(crate) fn startup_trace(stage: &str) {
 fn main() {
     startup_trace("host entry");
     tauri::Builder::default()
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
             #[cfg(target_os = "linux")]
             if args.iter().any(|arg| arg == "--browser") {
@@ -92,6 +99,7 @@ fn main() {
             startup_trace("host setup");
             app.manage(ui_language::UiLanguage::load(app.handle()));
             app.manage(cleaner::Cleaner::default());
+            app.manage(guard::Guard::platform());
             app.manage(browser::Browser::default());
             #[cfg(target_os = "macos")]
             browser::companion(app.handle().clone());
@@ -106,10 +114,10 @@ fn main() {
             TrayIconBuilder::with_id("main")
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .tooltip("CC")
+                .tooltip("Guard")
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "open" => show(app),
-                    "quit" => app.exit(0),
+                    "quit" => guard::request_quit(app.clone()),
                     _ => {}
                 })
                 .build(app)?;
@@ -126,6 +134,12 @@ fn main() {
             ui_language::ui_language_read,
             ui_language::ui_language_write,
             runtime_platform,
+            guard::guard_status,
+            guard::guard_inspect,
+            guard::guard_start,
+            guard::guard_lock,
+            guard::guard_recover,
+            guard_privacy_readback::guard_privacy_inspect,
             open_permissions,
             unlock_keychain,
             copy_result,
@@ -136,6 +150,7 @@ fn main() {
             identities::identities_switch,
             identities::identities_rename,
             identities::identities_delete,
+            identities::identities_browser,
             claude_cli::claude_cli_read,
             claude_cli::claude_cli_manage,
             regions::get_regions,
@@ -158,8 +173,12 @@ fn main() {
             network_links::network_open_resource
         ])
         .build(tauri::generate_context!())
-        .expect("无法启动 CCBaga-A")
+        .expect("无法启动 Guard")
         .run(|app, event| match event {
+            tauri::RunEvent::ExitRequested { api, .. } if !guard::may_quit(app) => {
+                api.prevent_exit();
+                guard::request_quit(app.clone());
+            }
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => show(app),
             tauri::RunEvent::Exit => browser::forget_start_url(app),
