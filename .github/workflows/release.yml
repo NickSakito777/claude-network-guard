@@ -75,7 +75,7 @@ jobs:
           python3 -m pip install --require-hashes --only-binary=:all: -r scripts/release-requirements.txt
           python3 scripts/fetch-browser.py
       - name: Restore Rust dependency cache
-        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: src-tauri -> target
           cache-on-failure: true
@@ -175,7 +175,7 @@ jobs:
           rustup default 1.98.1
           bun install --frozen-lockfile
           python3 scripts/fetch-browser.py
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           workspaces: src-tauri -> target
           shared-key: linux-ubuntu24
@@ -203,7 +203,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           workspaces: src-tauri -> target
           shared-key: linux-arch
@@ -260,7 +260,7 @@ jobs:
           python scripts/fetch-browser.py
           if($LASTEXITCODE){exit $LASTEXITCODE}
       - if: inputs.installer_run == ''
-        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           workspaces: src-tauri -> target
           shared-key: windows-msvc
