@@ -1,0 +1,138 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Shared Mac/Windows acceptance inventory, not a passed-test report",
+  "platforms": [
+    "macos",
+    "windows"
+  ],
+  "cases": [
+    {
+      "id": "unavailable-refusal",
+      "requirement": "No platform adapter: start and live mutations refuse; repair reads remain available",
+      "evidenceRequired": "fixture",
+      "macos": "pending",
+      "windows": "pending"
+    },
+    {
+      "id": "inspection-no-grant",
+      "requirement": "Inspection cannot create or expand authorization",
+      "evidenceRequired": "fixture",
+      "macos": "pending",
+      "windows": "pending"
+    },
+    {
+      "id": "recovery-no-start",
+      "requirement": "Recovery never grants or starts a target",
+      "evidenceRequired": "fixture",
+      "macos": "pending",
+      "windows": "pending"
+    },
+    {
+      "id": "lock-before-stop",
+      "requirement": "Close entry before stopping workloads; incomplete cleanup stays recovery",
+      "evidenceRequired": "platform",
+      "macos": "pending",
+      "windows": "pending"
+    },
+    {
+      "id": "stale-completion",
+      "requirement": "Lock invalidates old completion; backend cannot grant on stale generation",
+      "evidenceRequired": "fixture-and-platform",
+      "macos": "pending",
+      "windows": "pending"
+    },
+    {
+      "id": "operation-exclusion",
+      "requirement": "Guard commands and environment mutations use one operation lease",
+      "evidenceRequired": "fixture",
+      "macos": "pending",
+      "windows": "pending"
+    },
+    {
+      "id": "target-scope",
+      "requirement": "Only supported and verified target may launch; arbitrary executable rejected",
+      "evidenceRequired": "fixture-and-platform",
+      "macos": "pending",
+      "windows": "pending"
+    },
+    {
+      "id": "environment-transaction",
+      "requirement": "Identity switch failure retains existing save/pending/rollback semantics",
+      "evidenceRequired": "fixture-and-platform",
+      "macos": "pending",
+      "windows": "pending"
+    },
+    {
+      "id": "all-launch-routes",
+      "requirement": "UI, IPC, startup, single-instance, browser launcher and associations honor Guard",
+      "evidenceRequired": "source-and-platform",
+      "macos": "pending",
+      "windows": "pending"
+    },
+    {
+      "id": "exit-cleanup",
+      "requirement": "Exit confirms cleanup or leaves recovery visible; no updater restart bypass",
+      "evidenceRequired": "fixture-and-platform",
+      "macos": "pending",
+      "windows": "pending"
+    },
+    {
+      "id": "transport-boundary",
+      "requirement": "IPv4 IPv6 TCP UDP DNS and existing connections have observed enforcement evidence",
+      "evidenceRequired": "platform",
+      "macos": "pending",
+      "windows": "pending"
+    },
+    {
+      "id": "lifecycle",
+      "requirement": "Switch network, sleep, restart, host/backend crash keep prescribed closed state",
+      "evidenceRequired": "platform",
+      "macos": "pending",
+      "windows": "pending"
+    },
+    {
+      "id": "unrelated-applications",
+      "requirement": "Codex domestic traffic Obsidian and original Harness unchanged",
+      "evidenceRequired": "platform",
+      "macos": "pending",
+      "windows": "pending"
+    },
+    {
+      "id": "managed-code-mcp",
+      "requirement": "Dedicated Code/MCP subprocesses and login browser stay within enforced boundary",
+      "evidenceRequired": "platform",
+      "macos": "pending",
+      "windows": "pending"
+    },
+    {
+      "id": "local-mutation-closed-scope",
+      "requirement": "Pure local identity writes hold the shared lease and use fresh owned closed entry, zero pairs, no pending launch, complete target/descendant quiescence; public IP failure alone is not a blocker. Unknown scope, cancellation or domain recovery conflicts refuse; save never reopens.",
+      "evidenceRequired": "fixture-and-platform",
+      "macos": "pending",
+      "windows": "pending"
+    },
+    {
+      "id": "runtime-vs-artifact-evidence",
+      "requirement": "Runtime prerequisites do not claim signed artifact / installed enforcement acceptance; fixture results cannot grant or mark platform cases passed.",
+      "evidenceRequired": "source-and-platform",
+      "macos": "pending",
+      "windows": "pending"
+    },
+    {
+      "id": "renewal-source-expiry",
+      "requirement": "Native Gate expires within three seconds when its renewal source stops; React stall alone is not evidence that renewal stopped.",
+      "evidenceRequired": "platform",
+      "macos": "pending",
+      "windows": "pending"
+    }
+  ],
+  "futureOnly": [
+    "wsl2",
+    "docker"
+  ],
+  "notes": [
+    "Fixture reports belong in separate run evidence.",
+    "Windows native acceptance cannot be inferred from a Mac build.",
+    "Mac runtime adapter is wired but unprepared until explicit sealed activation; Windows prerequisites remain unavailable. This inventory is not evidence of current host acceptance."
+  ]
+}

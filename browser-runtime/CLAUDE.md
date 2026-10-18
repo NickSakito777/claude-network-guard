@@ -1,3 +1,7 @@
+# Guard browser runtime
+> Parent: ../CLAUDE.md
+
+The upstream engine/profile implementation remains in src-tauri/src/browser. In this fork the macOS CCBrowser.c external entry refuses to execute Chromium until an authenticated Guard launch handoff is implemented and accepted. No runtime binaries are downloaded, branded or installed by this integration step. Existing engine provenance and licences remain unchanged.
 # browser-runtime/
 > L2 | 父级: ../CLAUDE.md
 Browser.app/: 固定摘要下载的 Fingerprint Chromium 148 引擎与许可证；由 scripts/brand-browser.sh 品牌化为「CCBaga-B」：CFBundleIdentifier 显式设为 ai.local.requirement-french.browser，与宿主进程/默认浏览器识别一致；CFBundleExecutable 为 CCBrowser 入口，各 lproj 显示名、app.icns（橙底奶白浏览器 B）、LSHandlerRank Default。正式版本用与宿主相同的 Developer ID、Hardened Runtime 与可信时间戳，嵌套程序同团队；本机开发临时签名不启用 runtime，以允许无 Team ID 的 Framework 加载，仅 Renderer/GPU Helper 允许 JIT。安装为 /Applications/CCBaga-B.app 后进入默认浏览器列表，宿主优先使用这份。

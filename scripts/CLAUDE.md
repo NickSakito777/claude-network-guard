@@ -1,5 +1,11 @@
 # scripts/
 > L2 | 父级: ../CLAUDE.md
+
+Guard 分支：发布／安装脚本当前保留作上游参考，不是本阶段操作入口。
+check-guard-native.sh: 以进程内 TAURI_CONFIG 排除未安装的浏览器资源，运行定向 Guard／操作锁测试与宿主检查；不代表浏览器可启动。
+guard-tool.sh: 仅进程内设置工程专用 Rust/Bun 工具与缓存路径；清除启用真实系统 CI 测试的环境标志。
+test-guard-launcher.sh: 编译并执行拒绝直启的 C 入口，验证退出码 77；不启动浏览器或访问网络。
+
 make-icon.swift: AppKit 将压缩品牌图绘入 macOS 圆角网格，保持原图并添加透明留白与投影。
 make-icons.sh: 从 assets/ 品牌图生成各尺寸 iconset，iconutil 输出 src-tauri/icons 与 browser-runtime/icons。
 brand-browser.sh: 编译 CCBrowser 入口、写入 CCBaga-B 名称/图标/各语言显示名、清除构建资源扩展属性并调用 sign-browser.py 完整签名（显式固定 ai.local.requirement-french.browser，干净上游引擎也必须与宿主一致）。
@@ -41,3 +47,8 @@ build-arch.sh: 固定摘要容器准备 Node.js 等构建/测试依赖，以非 
 package-linux-browser.py: 旧目录移动与新目录提交共处取消/回滚边界；Linux 源码/Arch 的所属引擎目录完整替换；暂存和提交失败保留旧构建，回滚失败保留备份并报告恢复路径，保持符号链接/权限和其他资源，不混入已删除的旧引擎文件。
 test-package-linux-browser.py: 四种目录移动取消恢复及取消后恢复失败保留备份；真实打包入口的首次/重建、版本/执行权限前置检查、复制/提交回滚及双重失败备份保留回归；临时样本不安装引擎，非 Linux 仅替换 uname 选择 Linux 分支。
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
+check-guard-gate.sh: 使用匿名 Unix socket pair 验证入口租期、断路和双向背压，不监听 TCP。
+generate-cli-privacy-swift.rs/.sh: 从 Rust 唯一遥测策略生成 Mac Swift 子进程环境常量；不复制第二套开关、不启动目标应用。
+build-guard-macos-local.py: 默认构建并临时签署工程内 Guard.app；--compare-metadata 显式双路径只读比较并直接返回；--candidate-output-dir NEW_DIR --reviewed-manifest JSON 在 .guard-artifacts 内独占新目录，先构建前端再 locked/offline Cargo，绑定源码、dist、程序及 manifest 摘要并仅签署新候选；不覆盖旧包、不安装或启动，reviewed 参数名和元数据相符均不代表平台验收。
+test-guard-artifact-metadata.py: 临时伪包与策略源码 fixture 验证同版本不同工件、目标规格和禁用项/baseline 差异、候选输出冲突及 manifest/helper 失配拒绝和 not_evaluated 边界；不读真实包、不签名、不启动或修改验收记录。

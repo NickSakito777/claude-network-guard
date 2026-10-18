@@ -1,3 +1,9 @@
+# Guard fork scope (2026-10-14)
+
+This checkout follows AGENTS.md and docs/guard-contract.md. Guard is the main product UI; CCBaga supplies the full environment-management implementation. Upstream branding, auto-update, browser auto-launch and publishing procedures below are historical/reference behavior, not authorization to execute them. Current live configuration must remain unchanged.
+
+---
+
 # CCBaga - CCBaga-A（宿主，橙底清理员 A）与 CCBaga-B（指纹 Chromium，橙底浏览器 B）
 安装为 /Applications/CCBaga-A.app（ai.local.requirement-french）与 /Applications/CCBaga-B.app（ai.local.requirement-french.browser）；稳定包标识与独立资料目录保护钥匙串、设置和浏览器资料。
 Tauri 2.12.1 + Rust + macOS AppKit/UniformTypeIdentifiers/Accessibility/Security/CoreLocation + SHA-256 + React 19.3.0 + TypeScript 5.9.3 + Cromma UI 本地副本 + Radix UI 1.6.7 + Tailwind CSS 4.3.3 + Motion 14.0.0 + Vite 7.3.6 + YAML 2.9.1（仅构建）
