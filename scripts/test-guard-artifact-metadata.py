@@ -188,6 +188,7 @@ def run():
             '[package]\nname = "fixture"\nversion = "0.2.0"\n', encoding='utf-8')
         identity = MODULE.candidate_build_identity(version_root)
         assert identity['version'] == identity['packageVersion'] == identity['cargoVersion'] == '0.2.0'
+        assert identity['build'] == '2'
 
         installed = root / 'installed/Guard.app'
         candidate = root / 'candidate/Guard.app'

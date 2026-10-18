@@ -50,5 +50,5 @@ test-package-linux-browser.py: 四种目录移动取消恢复及取消后恢复�
 
 check-guard-gate.sh: 使用匿名 Unix socket pair 验证入口租期、断路和双向背压，不监听 TCP。
 generate-cli-privacy-swift.rs/.sh: 从 Rust 唯一遥测策略生成 Mac Swift 子进程环境常量；不复制第二套开关、不启动目标应用。
-build-guard-macos-local.py: 默认构建并临时签署工程内 Guard.app；--compare-metadata 显式双路径只读比较并直接返回；--candidate-output-dir NEW_DIR --reviewed-manifest JSON 在 .guard-artifacts 内独占新目录，先构建前端再 locked/offline Cargo，绑定源码、dist、程序及 manifest 摘要并仅签署新候选；不覆盖旧包、不安装或启动，reviewed 参数名和元数据相符均不代表平台验收。
+build-guard-macos-local.py: 默认构建并临时签署工程内 Guard.app；--compare-metadata 显式双路径只读比较并直接返回；--candidate-output-dir NEW_DIR --reviewed-manifest JSON 在 .guard-artifacts 内独占新目录，先构建前端再 locked/offline Cargo，绑定源码、dist、程序及 manifest 摘要并仅签署新候选；候选 CFBundleVersion 为 2；不覆盖旧包、不安装或启动，reviewed 参数名和元数据相符均不代表平台验收。
 test-guard-artifact-metadata.py: 临时伪包与策略源码 fixture 验证同版本不同工件、目标规格和禁用项/baseline 差异、候选输出冲突及 manifest/helper 失配拒绝和 not_evaluated 边界；不读真实包、不签名、不启动或修改验收记录。

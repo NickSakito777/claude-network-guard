@@ -15,6 +15,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parent.parent
 ARTIFACTS = ROOT / '.guard-artifacts'
 BUNDLE_ID = 'local.fox.guard'
+CANDIDATE_BUILD_NUMBER = '2'
 POLICY_SOURCE_PATHS = (
     'native/macos/lulu/LuLuManifest.swift',
     'native/macos/lulu/LuLuServices.swift',
@@ -284,7 +285,7 @@ def candidate_build_identity(root=ROOT):
         'packageVersion': package_version,
         'tauriVersion': tauri_version,
         'cargoVersion': cargo_version,
-        'build': '1',
+        'build': CANDIDATE_BUILD_NUMBER,
     }
 
 

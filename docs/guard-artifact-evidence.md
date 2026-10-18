@@ -48,7 +48,7 @@ The bundle contains `candidate-build-evidence.json`. It binds the app bundle ID/
 
 Manifest preflight checks JSON/schema/route/controller identity, target and disabled ID sets from current sources, structural target fields, baseline count and required path names, and that `factsScriptSHA256` matches the helper being packaged. It does not read the baseline files, resolve target signatures, or establish that any target path/scope is valid on this machine. Exact target `bundlePath`, executable, arguments, and scopes remain subject to the fixed Swift supervisor checks; the metadata field reports this full policy validation as `not_available`. A syntactically valid manifest or signed bundle is not target-machine acceptance.
 
-This entry has been implemented and covered by offline fixtures; this instruction does not mean a real candidate build has run. Wait for source freeze and a specifically reviewed manifest before invoking it.
+This file documents the candidate-build procedure, not the result for any particular candidate. Inspect each candidate's embedded `candidate-build-evidence.json` for its source revision, input digest, manifest digest, and `deploymentAcceptance` value. That evidence is not a receipt or an acceptance decision.
 
 ## Evidence limits
 
@@ -64,7 +64,9 @@ python3 scripts/test-guard-artifact-metadata.py
 
 It creates synthetic bundles and source snippets in a temporary directory, imports only the pure metadata functions, then deletes that temporary tree. It does not call the build function, access the installed app, invoke codesign, contact the network, or modify LuLu or application state.
 
-## Observed repository snapshot
+## Historical artifact snapshot
+
+The comparison below is a point-in-time record for earlier build 1 artifacts. It does not describe the later installed bundle, the 2026-10-18 candidate, or the candidate rebuilt from the final private source commit. Use the metadata embedded in each named candidate and a fresh read-only comparison for current artifacts.
 
 At the time this note was added, the installed bundle and both deployment candidates reported version `0.2.0`, build `1`, and bundle ID `local.fox.guard`. Equal version fields did not make them the same artifact.
 

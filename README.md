@@ -1,6 +1,10 @@
 # Guard — CCBaga integration workspace
 
-This independent fork implements the agreed Guard-facing host. Current installed protection is unchanged. **The Mac LuLu executor is now wired, but not enrolled, installed or accepted on the host.** The Windows WFP foundation is wired but its service/principal/gate/launcher prerequisites are absent; all Windows targets remain unavailable. Passing fixtures does not establish network enforcement.
+This independent fork implements the agreed Guard-facing host. Guard source is published in the selected private repository, [NickSakito777/claude-network-guard](https://github.com/NickSakito777/claude-network-guard), on `main`; this is a private source publication, not a Guard binary release. The `origin` remote remains the CCBaga upstream and Guard changes use the separate `guard-private` remote.
+
+The already installed local Guard bundle remains unchanged and predates this final source revision. The next review candidate uses version `0.2.0`, macOS `CFBundleVersion` `2`, and the existing bundle identifier `local.fox.guard`; it is an uninstalled review artifact, not a deployment acceptance receipt. The Mac LuLu path is implemented, but strict D/E live acceptance and the intermittent timeout root cause remain unresolved. A historical Claude Prepare → Start → conversation → Lock flow completed on an earlier candidate and was not repeated for this source revision. SunBrowser remains unaccepted: the prior AdsPower attempt failed before its engine started.
+
+The Windows WFP foundation is partial source work. Its production write gate remains disabled pending a verified dedicated principal, provider/gate service, authenticated handoff and target launcher. Offline fixtures do not establish network enforcement on either platform.
 
 - Contract and platform boundaries: [docs/guard-contract.md](docs/guard-contract.md).
 - Shared acceptance: [docs/guard-acceptance.json](docs/guard-acceptance.json).
@@ -11,9 +15,9 @@ This independent fork implements the agreed Guard-facing host. Current installed
 
 ## Guard 0.2.0 release status
 
-**Version 0.2.0 (macOS bundle build 1).** This is a local review candidate, not an official or private-channel release. The recorded Prepare → Start → Claude conversation → Lock and exit flow is historical evidence and was not re-run for this closeout. Strict D/E live acceptance and the intermittent timeout root cause remain unresolved. The D-client v3 33/33 result covers offline fixtures only and is not Guard acceptance.
+**Version 0.2.0 (next macOS candidate build 2; bundle ID `local.fox.guard`).** This local candidate is for source review, not an official or private-channel binary release. The previously recorded Prepare → Start → Claude conversation → Lock and exit flow completed on an earlier candidate; it was not re-run for this source revision. Strict D/E live acceptance and the intermittent timeout root cause remain unresolved. The D-client v3 33/33 result covers offline fixtures only and is not Guard acceptance.
 
-No Guard installer, update feed or destination private repository has been selected. The CCBaga installation/update instructions in the preserved upstream README below do not apply to Guard. See [Guard 0.2.0 candidate notes](docs/guard-release-0.2.0.md).
+The private source repository is selected and contains the final source commit. No Guard installer, update feed or binary release has been selected. The CCBaga installation/update instructions in the preserved upstream README below do not apply to Guard. See [Guard 0.2.0 candidate notes](docs/guard-release-0.2.0.md).
 
 Project-only tools and caches are in ignored `.tools/`; frontend dependencies in `node_modules/`. On this Mac:
 
