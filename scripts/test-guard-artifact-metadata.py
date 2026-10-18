@@ -230,6 +230,27 @@ def run():
             package_manifest, sort_keys=True, separators=(',', ':')).encode('utf-8')
         package_manifest_metadata = MODULE.validate_candidate_manifest(
             package_manifest_raw, 'local.fox.guard', report['policyReference'], 'b' * 64)
+        assert MODULE.candidate_build_environment({'DEVELOPER_DIR': ''})['DEVELOPER_DIR'] == \
+            MODULE.DEFAULT_DEVELOPER_DIR
+        xcode_environment = MODULE.candidate_build_environment(
+            {'DEVELOPER_DIR': '/fixture/Xcode.app/Contents/Developer'})
+        assert xcode_environment['DEVELOPER_DIR'] == '/fixture/Xcode.app/Contents/Developer'
+        with mock.patch.object(MODULE.subprocess, 'run', side_effect=[
+                mock.Mock(returncode=0, stdout=b'swift-driver version: fixture Swift 6.4\nTarget: fixture\n'),
+                mock.Mock(returncode=0, stdout=b'/fixture/MacOSX.sdk\n'),
+        ]) as xcrun_calls:
+            fixture_toolchain = MODULE.macos_toolchain_evidence(xcode_environment)
+        assert fixture_toolchain == {
+            'developerDirectory': '/fixture/Xcode.app/Contents/Developer',
+            'sdkPath': '/fixture/MacOSX.sdk',
+            'swiftCompilerVersion': 'swift-driver version: fixture Swift 6.4',
+        }
+        assert [call.args[0] for call in xcrun_calls.call_args_list] == [
+            ['/usr/bin/xcrun', 'swiftc', '--version'],
+            ['/usr/bin/xcrun', '--show-sdk-path'],
+        ]
+        assert all(call.kwargs['env']['DEVELOPER_DIR'] == xcode_environment['DEVELOPER_DIR']
+                   for call in xcrun_calls.call_args_list)
         evidence = MODULE.make_candidate_build_evidence(
             identity,
             {'gitRevision': 'a' * 40, 'workingTreeInputSHA256': source_after},
@@ -240,6 +261,7 @@ def run():
             'd' * 64,
             'b' * 64,
             'e' * 64,
+            fixture_toolchain,
         )
         assert evidence['deploymentAcceptance'] == 'not_evaluated'
         assert evidence['artifactRole'] == 'uninstalled_candidate'
@@ -250,6 +272,7 @@ def run():
         assert evidence['inputBindings']['packagedFactsHelperSHA256'] == 'b' * 64
         assert evidence['inputBindings']['iconSHA256'] == 'e' * 64
         assert evidence['inputBindings']['manifestTargetIDs'] == sorted(ACTIVE_TARGETS)
+        assert evidence['inputBindings']['macOSToolchain'] == fixture_toolchain
         assert evidence['targetSpecificationPolicyValidation']['status'] == 'not_available'
         try:
             MODULE.validate_candidate_manifest(
@@ -289,6 +312,7 @@ def run():
             'd' * 64,
             'b' * 64,
             'e' * 64,
+            fixture_toolchain,
         )
         assert wrong_spec_evidence['deploymentAcceptance'] == 'not_evaluated'
         assert wrong_spec_evidence['targetSpecificationPolicyValidation']['status'] == 'not_available'

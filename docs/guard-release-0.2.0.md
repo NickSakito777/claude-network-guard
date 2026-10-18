@@ -32,7 +32,7 @@ Use a specifically reviewed manifest and a new output directory under .guard-art
 
 ```sh
 candidate_dir=".guard-artifacts/Guard-Candidate-0.2.0-build2-<unique-suffix>"
-DEVELOPER_DIR=/Library/Developer/CommandLineTools python3 scripts/build-guard-macos-local.py \
+DEVELOPER_DIR="${DEVELOPER_DIR:-/Library/Developer/CommandLineTools}" python3 scripts/build-guard-macos-local.py \
   --candidate-output-dir "$candidate_dir" \
   --reviewed-manifest "/absolute/path/to/reviewed-lulu-manifest.json"
 ```

@@ -25,6 +25,7 @@ MAX_MANIFEST_BYTES = 131_072
 MAX_BASELINE_BYTES = 67_108_864
 MAX_ICON_BYTES = 16_777_216
 CANDIDATE_BUILD_EVIDENCE = 'candidate-build-evidence.json'
+DEFAULT_DEVELOPER_DIR = '/Library/Developer/CommandLineTools'
 SOURCE_TREE_EXCLUDED_PARTS = {
     '.git', '.guard-artifacts', '.tools', 'node_modules', 'dist', 'target', 'gen',
     '__pycache__', '.vite', 'coverage',
@@ -289,6 +290,37 @@ def candidate_build_identity(root=ROOT):
     }
 
 
+def candidate_build_environment(environ=None):
+    environment = dict(os.environ if environ is None else environ)
+    if not environment.get('DEVELOPER_DIR'):
+        environment['DEVELOPER_DIR'] = DEFAULT_DEVELOPER_DIR
+    return environment
+
+
+def macos_toolchain_evidence(environment):
+    developer_directory = environment.get('DEVELOPER_DIR')
+    if not developer_directory:
+        raise ValueError('candidate build environment has no DEVELOPER_DIR')
+
+    def xcrun_text(*arguments):
+        result = subprocess.run(
+            ['/usr/bin/xcrun', *arguments], stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env=environment, check=False)
+        if result.returncode:
+            raise ValueError('could not inspect the selected macOS build toolchain')
+        value = result.stdout.decode('utf-8', errors='strict').strip()
+        if not value:
+            raise ValueError('selected macOS build toolchain returned empty metadata')
+        return value
+
+    swift_version = xcrun_text('swiftc', '--version').splitlines()[0]
+    return {
+        'developerDirectory': developer_directory,
+        'sdkPath': xcrun_text('--show-sdk-path'),
+        'swiftCompilerVersion': swift_version,
+    }
+
+
 def _swift_string_set(source, constant_name):
     pattern = (r'static\s+let\s+' + re.escape(constant_name) +
                r'\s*:\s*Set<String>\s*=\s*\[([^\]]*)\]')
@@ -508,7 +540,8 @@ def validate_candidate_manifest(raw, bundle_identifier, policy_reference,
 
 def make_candidate_build_evidence(identity, source_evidence, frontend_dist_sha256,
                                   manifest_raw, manifest_metadata, policy_reference,
-                                  binary_sha256, packaged_facts_sha256, icon_sha256):
+                                  binary_sha256, packaged_facts_sha256, icon_sha256,
+                                  toolchain_evidence):
     """Bind exact build inputs without creating a deployment or acceptance receipt."""
     manifest = manifest_metadata['_manifest']
     return {
@@ -524,6 +557,7 @@ def make_candidate_build_evidence(identity, source_evidence, frontend_dist_sha25
         'inputBindings': {
             'gitRevision': source_evidence['gitRevision'],
             'workingTreeInputSHA256': source_evidence['workingTreeInputSHA256'],
+            'macOSToolchain': toolchain_evidence,
             'frontendPackageVersion': identity['packageVersion'],
             'frontendDistSHA256': frontend_dist_sha256,
             'binarySHA256': binary_sha256,
@@ -795,10 +829,11 @@ def build_candidate_app(output_directory, reviewed_manifest_path):
     if source_tree_evidence() != source_before:
         raise ValueError('source inputs changed during candidate preflight; no build started')
 
+    build_env = candidate_build_environment()
+    toolchain_evidence = macos_toolchain_evidence(build_env)
+
     # mkdir is the exclusive reservation: an existing or concurrently claimed path is never replaced.
     output_directory.mkdir(mode=0o700)
-    build_env = dict(os.environ)
-    build_env.setdefault('DEVELOPER_DIR', '/Library/Developer/CommandLineTools')
     identity_overlay = json.dumps(
         {'identifier': identity['bundleIdentifier'], 'bundle': {'resources': None}},
         separators=(',', ':'))
@@ -848,7 +883,7 @@ def build_candidate_app(output_directory, reviewed_manifest_path):
         evidence = make_candidate_build_evidence(
             identity, source_before, frontend_dist_sha256, manifest_raw,
             manifest_metadata, policy_reference, binary_sha256,
-            current_facts_sha256, icon_sha256)
+            current_facts_sha256, icon_sha256, toolchain_evidence)
         (resources / CANDIDATE_BUILD_EVIDENCE).write_text(
             json.dumps(evidence, ensure_ascii=True, indent=2, sort_keys=True) + '\n',
             encoding='utf-8')
