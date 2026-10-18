@@ -39,3 +39,7 @@ identity-vault/
 *.baga
 identities.sqlite*
 key.bin
+
+# Guard local compiler/cache/evidence (never ship host state)
+.tools/
+.guard-artifacts/

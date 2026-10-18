@@ -1,3 +1,41 @@
+# Guard — CCBaga integration workspace
+
+This independent fork implements the agreed Guard-facing host. Current installed protection is unchanged. **The Mac LuLu executor is now wired, but not enrolled, installed or accepted on the host.** The Windows WFP foundation is wired but its service/principal/gate/launcher prerequisites are absent; all Windows targets remain unavailable. Passing fixtures does not establish network enforcement.
+
+- Contract and platform boundaries: [docs/guard-contract.md](docs/guard-contract.md).
+- Shared acceptance: [docs/guard-acceptance.json](docs/guard-acceptance.json).
+- Baseline: [CCBaga](https://github.com/liseami/CCBaga), commit `aff6122719c479effd4d53c7d875bcc3c04edcc8`; branch `guard/integration`. Upstream MIT and third-party notices remain in place.
+- Retained modules: identity transactions, browser environment, system settings, CLI tools and Network Skill. Live mutations require native Guard readiness. Repair navigation and reads remain available.
+- Guard adds the protection home, typed native operations, target-scoped gating and explicit unavailable/recovery states. Official auto-update and packaging hooks are disabled. The external macOS browser launcher refuses direct execution pending authenticated handoff.
+- Original Harness, Obsidian, running services and profiles are not imported or rewritten.
+
+## Guard 0.2.0 release status
+
+**Version 0.2.0 (macOS bundle build 1).** This is a local review candidate, not an official or private-channel release. The recorded Prepare → Start → Claude conversation → Lock and exit flow is historical evidence and was not re-run for this closeout. Strict D/E live acceptance and the intermittent timeout root cause remain unresolved. The D-client v3 33/33 result covers offline fixtures only and is not Guard acceptance.
+
+No Guard installer, update feed or destination private repository has been selected. The CCBaga installation/update instructions in the preserved upstream README below do not apply to Guard. See [Guard 0.2.0 candidate notes](docs/guard-release-0.2.0.md).
+
+Project-only tools and caches are in ignored `.tools/`; frontend dependencies in `node_modules/`. On this Mac:
+
+```sh
+sh scripts/guard-tool.sh bun test src/guard-model.test.ts src/i18n.test.ts
+sh scripts/guard-tool.sh bun run build
+sh scripts/test-guard-launcher.sh
+sh scripts/check-guard-gate.sh
+sh scripts/check-guard-native.sh
+sh scripts/guard-release-check.sh
+```
+
+The local Mac builder is [scripts/build-guard-macos-local.py](scripts/build-guard-macos-local.py). Its default output is `.guard-artifacts/Guard.app` and it refuses to replace an existing path. A manifest-bearing candidate requires a reviewed manifest and a new explicit output directory; its embedded metadata is not a deployment acceptance receipt. See [docs/guard-artifact-evidence.md](docs/guard-artifact-evidence.md) and [Guard 0.2.0 candidate notes](docs/guard-release-0.2.0.md).
+
+The native check script excludes bundle resources for this process only because the companion browser engine is not installed. It verifies the host source, not browser packaging or runtime availability.
+
+Do not use upstream `dev:install`, install/release scripts or real host integration tests during this stage. Windows must be compiled and accepted on Windows; do not copy the Mac `.tools/` folder there.
+
+---
+
+The following is the preserved upstream product README. Its distribution, automatic browser launch and update instructions describe official CCBaga, **not this Guard workspace**.
+
 <!--
 [INPUT]: 已实现功能、开发配置、跨平台 PR 回归、双应用使用方式与 MIT/第三方许可边界。
 [OUTPUT]: 面向公开仓库的英文产品首页、旅居人员用途声明、安装与开发入口、架构和贡献导航。

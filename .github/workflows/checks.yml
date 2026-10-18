@@ -97,6 +97,9 @@ jobs:
           python scripts/test-linux.py
           python scripts/test-package-linux-browser.py
           python scripts/test-rpm.py
+      - name: Guard offline pre-release checks
+        if: runner.os == 'macOS' && github.repository != 'liseami/CCBaga'
+        run: sh scripts/guard-release-check.sh
       - name: macOS signing and installation boundaries
         if: runner.os == 'macOS'
         run: |
