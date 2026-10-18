@@ -18,16 +18,19 @@ int lg_list_pids(pid_t *out, int capacity) {
 }
 int lg_process_status(pid_t pid, lg_status *out) {
     status_calls++;
+    if (status_calls>1 && scenario==23) return ESRCH;
+    if (status_calls>1 && scenario==25) return EPERM;
     if (scenario==2 || ((scenario==12 || scenario==19) && status_calls>1)) return EPERM;
     if (status_calls>1 && (scenario==3 || scenario==5 || scenario==8 || scenario==11 || scenario==14)) return ESRCH;
     memset(out,0,sizeof(*out)); out->pid=pid; out->uid=getuid(); out->birth_sec=1700000000; out->birth_usec=1;
-    if (scenario==20 && status_calls>1) out->birth_sec++;
+    if (status_calls>1 && (scenario==20 || scenario==26)) out->birth_sec++;
     return 0;
 }
 int lg_process_snapshot(pid_t pid, lg_process *out) {
     snapshot_calls++;
     if (scenario==3 || scenario==4) return ESRCH;
-    if ((scenario>=5 && scenario<=8) || scenario==19 || scenario==20) return EACCES;
+    if ((scenario>=5 && scenario<=8) || scenario==19 || scenario==20 ||
+        (scenario>=23 && scenario<=26)) return EACCES;
     if (scenario==9) return EPERM;
     if (scenario==13 && snapshot_calls>1) return EACCES;
     if ((scenario==14 || scenario==15) && snapshot_calls>1) return ESRCH;

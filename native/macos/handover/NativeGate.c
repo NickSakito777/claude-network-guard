@@ -39,6 +39,8 @@ struct ng_gate {
     bool destroyed;
     uint64_t generation;
     uint64_t deadline_ns;
+    int pending_client, pending_upstream;
+    uint64_t pending_generation;
     ng_pair pairs[NG_MAX_PAIRS];
 };
 
@@ -77,6 +79,37 @@ static ssize_t send_if_live(ng_gate *g, int fd, const void *data, size_t length)
 static void close_pair(ng_pair *p) {
     if (p->client >= 0) { shutdown(p->client, SHUT_RDWR); close(p->client); p->client = -1; }
     if (p->upstream >= 0) { shutdown(p->upstream, SHUT_RDWR); close(p->upstream); p->upstream = -1; }
+}
+
+// Caller holds g->mu. Pending descriptors remain owned by the accept thread;
+// the lock path shuts them down and waits for that thread to close the slots.
+static void close_pending_locked(ng_gate *g) {
+    if (g->pending_client >= 0) {
+        shutdown(g->pending_client, SHUT_RDWR);
+        close(g->pending_client);
+        g->pending_client = -1;
+    }
+    if (g->pending_upstream >= 0) {
+        shutdown(g->pending_upstream, SHUT_RDWR);
+        close(g->pending_upstream);
+        g->pending_upstream = -1;
+    }
+    g->pending_generation = 0;
+    pthread_cond_broadcast(&g->idle);
+}
+
+// Caller holds g->mu. Accept and registration must be one critical section so
+// ng_lock cannot return between accept(2) and accounting for the client.
+static bool begin_pending_locked(ng_gate *g, int client, uint64_t *generation) {
+    if (!live_locked(g) || g->pending_client >= 0 || g->pending_upstream >= 0) {
+        close(client);
+        return false;
+    }
+    g->pending_client = client;
+    g->pending_upstream = -1;
+    g->pending_generation = g->generation;
+    if (generation) *generation = g->generation;
+    return true;
 }
 
 static int nonblock(int fd) {
@@ -133,38 +166,83 @@ static void *relay(void *opaque) {
     return NULL;
 }
 
-static int adopt(ng_gate *g, int client, int upstream, uint64_t generation) {
-    pthread_mutex_lock(&g->mu);
-    if (!live_locked(g) || generation != g->generation) {
-        pthread_mutex_unlock(&g->mu); close(client); close(upstream); return EPERM;
+// Caller holds g->mu; this atomically moves the pending descriptors into a
+// relay slot, or closes them if the lease/generation was invalidated.
+static int adopt_pending_locked(ng_gate *g, uint64_t generation) {
+    if (!live_locked(g) || generation != g->generation ||
+        generation != g->pending_generation || g->pending_client < 0 ||
+        g->pending_upstream < 0) {
+        if (g->pending_generation == generation) close_pending_locked(g);
+        return EPERM;
     }
     ng_pair *slot = NULL;
     for (size_t i = 0; i < NG_MAX_PAIRS; ++i)
         if (!g->pairs[i].running && g->pairs[i].client == -1) { slot = &g->pairs[i]; break; }
-    if (!slot) { pthread_mutex_unlock(&g->mu); close(client); close(upstream); return ENOSPC; }
-    slot->client = client; slot->upstream = upstream; slot->running = true;
+    if (!slot) { close_pending_locked(g); return ENOSPC; }
+    slot->client = g->pending_client;
+    slot->upstream = g->pending_upstream;
+    g->pending_client = g->pending_upstream = -1;
+    g->pending_generation = 0;
+    slot->running = true;
     int rc = pthread_create(&slot->thread, NULL, relay, slot);
     if (rc) { close_pair(slot); slot->running = false; }
     else pthread_detach(slot->thread);
-    pthread_mutex_unlock(&g->mu);
+    pthread_cond_broadcast(&g->idle);
     return rc;
 }
 
-static int connect_upstream(void) {
+static int connect_upstream(ng_gate *g, uint64_t generation) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     if (nonblock(fd) < 0) { close(fd); return -1; }
+    pthread_mutex_lock(&g->mu);
+    if (!live_locked(g) || generation != g->pending_generation ||
+        g->pending_client < 0 || g->pending_upstream >= 0) {
+        pthread_mutex_unlock(&g->mu);
+        close(fd);
+        return -1;
+    }
+    // Publish before connect(2), allowing lock/expiry to interrupt the
+    // in-flight socket while it is still outside the relay-pair table.
+    g->pending_upstream = fd;
+    pthread_mutex_unlock(&g->mu);
     struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons(7896)};
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     int rc = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
-    if (rc < 0 && errno != EINPROGRESS) { close(fd); return -1; }
+    if (rc < 0 && errno != EINPROGRESS) return -1;
     if (rc < 0) {
         struct pollfd wait = {.fd = fd, .events = POLLOUT};
-        if (poll(&wait, 1, 500) <= 0) { close(fd); return -1; }
+        if (poll(&wait, 1, 500) <= 0) return -1;
         int error = 0; socklen_t len = sizeof(error);
-        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &len) < 0 || error) { close(fd); return -1; }
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &len) < 0 || error) return -1;
     }
-    return fd;
+    return 0;
+}
+
+static int accept_pending_client(ng_gate *g, uint64_t *generation) {
+    pthread_mutex_lock(&g->mu);
+    if (!g->accepting || g->listener < 0) {
+        pthread_mutex_unlock(&g->mu);
+        return -1;
+    }
+    int client = accept(g->listener, NULL, NULL);
+    if (client >= 0 && !begin_pending_locked(g, client, generation)) client = -1;
+    pthread_mutex_unlock(&g->mu);
+    return client;
+}
+
+static void finish_pending(ng_gate *g, uint64_t generation) {
+    pthread_mutex_lock(&g->mu);
+    if (g->pending_client >= 0 && g->pending_generation == generation)
+        close_pending_locked(g);
+    pthread_mutex_unlock(&g->mu);
+}
+
+static int adopt_pending(ng_gate *g, uint64_t generation) {
+    pthread_mutex_lock(&g->mu);
+    int rc = adopt_pending_locked(g, generation);
+    pthread_mutex_unlock(&g->mu);
+    return rc;
 }
 
 static void *accept_loop(void *opaque) {
@@ -178,18 +256,17 @@ static void *accept_loop(void *opaque) {
         if (listener < 0) { ng_lock(g); break; }
         struct pollfd wait = {.fd = listener, .events = POLLIN};
         if (poll(&wait, 1, 100) <= 0) { close(listener); ng_tick(g); continue; }
-        int client = accept(listener, NULL, NULL);
         close(listener);
+        uint64_t generation = 0;
+        int client = accept_pending_client(g, &generation);
         if (client < 0) continue;
-        uint64_t generation = current_generation(g);
-        if (!generation) { close(client); continue; }
-        int upstream = connect_upstream();
-        if (upstream < 0 || current_generation(g) != generation) {
-            close(client); if (upstream >= 0) close(upstream);
-            if (upstream < 0) ng_lock(g);
+        if (connect_upstream(g, generation) < 0) {
+            bool same_live_generation = current_generation(g) == generation;
+            finish_pending(g, generation);
+            if (same_live_generation) ng_lock(g);
             continue;
         }
-        adopt(g, client, upstream, generation);
+        (void)adopt_pending(g, generation);
     }
     return NULL;
 }
@@ -200,6 +277,7 @@ ng_gate *ng_create(void) {
     pthread_mutex_init(&g->mu, NULL);
     pthread_cond_init(&g->idle, NULL);
     g->listener = -1;
+    g->pending_client = g->pending_upstream = -1;
     for (size_t i = 0; i < NG_MAX_PAIRS; ++i) g->pairs[i].client = g->pairs[i].upstream = -1, g->pairs[i].gate = g;
     return g;
 }
@@ -256,6 +334,8 @@ static void lock_pairs_locked(ng_gate *g) {
     while (g->locking) pthread_cond_wait(&g->idle, &g->mu);
     g->locking = true;
     g->opened = false; g->deadline_ns = 0;
+    if (g->pending_client >= 0) shutdown(g->pending_client, SHUT_RDWR);
+    if (g->pending_upstream >= 0) shutdown(g->pending_upstream, SHUT_RDWR);
     for (size_t i = 0; i < NG_MAX_PAIRS; ++i) {
         if (g->pairs[i].client >= 0) shutdown(g->pairs[i].client, SHUT_RDWR);
         if (g->pairs[i].upstream >= 0) shutdown(g->pairs[i].upstream, SHUT_RDWR);
@@ -263,7 +343,7 @@ static void lock_pairs_locked(ng_gate *g) {
     for (;;) {
         bool running = false;
         for (size_t i = 0; i < NG_MAX_PAIRS; ++i) running |= g->pairs[i].running;
-        if (!running) break;
+        if (!running && g->pending_client < 0) break;
         pthread_cond_wait(&g->idle, &g->mu);
     }
     g->locking = false;
@@ -298,7 +378,39 @@ void ng_revoke(ng_gate *g) {
 #ifdef NG_OFFLINE_TEST
 int ng_test_adopt_pair(ng_gate *g, int client_fd, int upstream_fd) {
     if (!g || client_fd < 0 || upstream_fd < 0) return EINVAL;
-    return adopt(g, client_fd, upstream_fd, current_generation(g));
+    uint64_t generation = 0;
+    pthread_mutex_lock(&g->mu);
+    if (!begin_pending_locked(g, client_fd, &generation)) {
+        pthread_mutex_unlock(&g->mu); close(upstream_fd); return EPERM;
+    }
+    g->pending_upstream = upstream_fd;
+    int rc = adopt_pending_locked(g, generation);
+    pthread_mutex_unlock(&g->mu);
+    return rc;
+}
+int ng_test_begin_pending(ng_gate *g, int client_fd, uint64_t *generation) {
+    if (!g || client_fd < 0 || !generation) return EINVAL;
+    pthread_mutex_lock(&g->mu);
+    bool accepted = begin_pending_locked(g, client_fd, generation);
+    pthread_mutex_unlock(&g->mu);
+    return accepted ? 0 : EPERM;
+}
+int ng_test_complete_pending(ng_gate *g, uint64_t generation, int upstream_fd) {
+    if (!g || !generation || upstream_fd < 0) return EINVAL;
+    pthread_mutex_lock(&g->mu);
+    if (!live_locked(g) || generation != g->generation ||
+        generation != g->pending_generation || g->pending_client < 0 ||
+        g->pending_upstream >= 0) {
+        shutdown(upstream_fd, SHUT_RDWR); close(upstream_fd);
+        if (g->pending_client >= 0 && g->pending_generation == generation)
+            close_pending_locked(g);
+        pthread_mutex_unlock(&g->mu);
+        return EPERM;
+    }
+    g->pending_upstream = upstream_fd;
+    int rc = adopt_pending_locked(g, generation);
+    pthread_mutex_unlock(&g->mu);
+    return rc;
 }
 void ng_test_enable(ng_gate *g) {
     if (!g) return;
@@ -335,6 +447,7 @@ size_t ng_active_pairs(ng_gate *g) {
     if (!g) return 0;
     pthread_mutex_lock(&g->mu); size_t n = 0;
     for (size_t i = 0; i < NG_MAX_PAIRS; ++i) if (g->pairs[i].running) ++n;
+    if (g->pending_client >= 0) ++n;
     pthread_mutex_unlock(&g->mu); return n;
 }
 void ng_destroy(ng_gate *g) {

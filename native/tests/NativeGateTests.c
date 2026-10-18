@@ -2,7 +2,9 @@
 #include <assert.h>
 #include <errno.h>
 #include <poll.h>
+#include <pthread.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -10,6 +12,14 @@
 static void readable(int fd) {
     struct pollfd p = {.fd = fd, .events = POLLIN | POLLHUP};
     assert(poll(&p, 1, 1000) == 1);
+}
+
+struct lock_context { ng_gate *gate; atomic_int returned; };
+static void *lock_gate(void *opaque) {
+    struct lock_context *context = opaque;
+    ng_lock(context->gate);
+    atomic_store(&context->returned, 1);
+    return NULL;
 }
 
 int main(void) {
@@ -68,6 +78,35 @@ int main(void) {
     assert(!ng_is_open(gate));
     assert(ng_renew(gate, 1, 1000000ULL) != 0);
     assert(ng_renew(gate, 2, 1000000ULL) == 0);
+    ng_destroy(gate);
+
+    // An accepted client remains visible to the real readback until the
+    // in-flight upstream step resolves. Lock shuts its client side immediately
+    // but cannot confirm zero active connections before stale completion drops
+    // the generation and closes the pending upstream.
+    gate = ng_create(); ng_test_enable(gate);
+    assert(ng_renew(gate, 7, 3000000000ULL) == 0);
+    int pending_client[2], pending_upstream[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, pending_client) == 0);
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, pending_upstream) == 0);
+    uint64_t pending_generation = 0;
+    assert(ng_test_begin_pending(gate, pending_client[1], &pending_generation) == 0);
+    assert(pending_generation == 7 && ng_active_pairs(gate) == 1);
+    struct lock_context context = {.gate = gate};
+    atomic_init(&context.returned, 0);
+    pthread_t locker;
+    assert(pthread_create(&locker, NULL, lock_gate, &context) == 0);
+    readable(pending_client[0]);
+    assert(read(pending_client[0], data, sizeof(data)) == 0);
+    assert(!atomic_load(&context.returned));
+    assert(ng_active_pairs(gate) == 1);
+    assert(ng_test_complete_pending(gate, pending_generation, pending_upstream[0]) == EPERM);
+    pthread_join(locker, NULL);
+    assert(atomic_load(&context.returned));
+    assert(!ng_is_open(gate) && ng_active_pairs(gate) == 0);
+    readable(pending_upstream[1]);
+    assert(read(pending_upstream[1], data, sizeof(data)) == 0);
+    close(pending_client[0]); close(pending_upstream[1]);
     ng_destroy(gate);
     return 0;
 }

@@ -126,3 +126,20 @@ events retain the failure under the unchanged bounded history policy.
 Raw ps output, argv/environment, arbitrary error strings and account data never
 enter the evidence. Test-only synthetic transport does not prove live failure
 attribution or installed enforcement; the installed Recovery app is untouched.
+
+
+The 2026-10-18 inventory follow-up rechecks the PID/UID/birth captured before
+path discovery when `ps` itself fails. Only `ESRCH` or the same identity's
+confirmed zombie result skips that inventory row. A live process, reused PID,
+or unreadable status keeps cleanup unconfirmed and retains the original `ps`
+failure plus the identity result. The additional status query is limited to the
+`ps` failure path; target scope, signature requirements and signal eligibility
+are unchanged. Synthetic fixtures cover exit, reuse, live and unreadable cases.
+
+The 2026-10-18 Gate follow-up registers an accepted client under the Gate mutex
+before beginning upstream connect. Lock shuts down tracked pending client and
+upstream descriptors, waits for the pending slot and relay pairs, and reports
+pending connections in the existing active-pair readback. The listener remains
+bound during normal lock, so zero active-pair readback is not a claim that the
+listener FD or kernel accept backlog is absent. Unix socket-pair fixtures test
+the pending completion/generation race; they do not establish live enforcement.

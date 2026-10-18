@@ -79,6 +79,8 @@ and its readback in the existing bounded reason/event, including while a fault
 is latched; UI translation does not affect admission. A post-signal nonempty
 inventory is distinguished from an in-flight supervisor launch. A later empty
 inventory cannot retroactively confirm the earlier failed cleanup.
+The finish ABI exposes no new stop or query operation; the inventory's one
+additional status query is confined to the candidate-`ps` failure path below.
 
 The three-second lease renews from the cached verified fingerprint and network
 generation plus fresh root-observer identities for both loopback listeners.
@@ -95,6 +97,13 @@ bytes; this accounts for executable access changing only atime. Writes,
 permission changes, replacement, revoke, rename, or any combined event mask
 still close the gate. Any network, extension, or other watched-file fault
 closes the gate and stops both monitors.
+
+The native Gate lock shuts down relays and the accepted-client slot while it is
+waiting for upstream connect/adoption, and waits until both have drained. Its
+existing active-pair readback includes a pending accepted client. The normal
+locked listener remains bound for inspect/recovery; zero active pairs means no
+tracked pending client or relay, not that the listener or kernel backlog is
+gone. Lock and revoke retain their distinct meanings.
 Closed-state recovery revalidates files and enrolls fresh monitors. While active,
 the Rust adapter runs a separate full verifier every 20 seconds; it rechecks
 LuLu policy and extension state and refreshes public-IP evidence. Renewal never
@@ -203,7 +212,11 @@ is the signed 64-bit launch NSError code or termination status. `psBytes` is the
 bounded output size; `psFlags` bits mean exit-zero=1, within-8192=2, UTF8=4,
 valid-single-line=8. Unperformed checks leave bits unset; original ps text,
 arguments, environment, arbitrary error descriptions and account data are never
-recorded. The known ps-before-status exit race is intentionally unchanged.
+recorded. After any ps inspection failure, the supervisor now rechecks the
+initial PID/UID/birth. A confirmed exit is skipped; a live, changed, or
+unreadable identity retains the original ps diagnostic and remains fail-closed.
+This resolves the false inspection failure when a process exits during failed
+path discovery without granting a `ps` result any identity or signal authority.
 
 The caller-local 512-byte finish buffer contains the original key plus at most
 one evidence line. The four cleanup inventory phases are before TERM, TERM
@@ -214,8 +227,8 @@ the first failing cleanup and same-call six readbacks, reserving up to 768 of
 the existing 1024-character reason/event budget. A later empty inventory cannot
 retroactively confirm that earlier failure. No success predicate changed.
 
-Offline verification (no app packaging or real process effects in the new
-inventory test): `sh native/tests/run-legacy-inventory-evidence-tests.sh`.
+Offline verification (no app packaging, real `ps`, or real process effects in
+the inventory test): `sh native/tests/run-legacy-inventory-evidence-tests.sh`.
 The existing explicit cleanup E2E suite also verifies all 16 evidence steps,
 four phases, bounded transport, success clearing and first-failure retention.
 Set `GUARD_INVENTORY_REASON_FIXTURE` only for that test to export synthetic

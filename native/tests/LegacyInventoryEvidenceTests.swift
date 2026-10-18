@@ -45,8 +45,8 @@ final class Process {
         let supervisor = try LegacyApplicationSupervisor(targets:[target()])
         let rows: [(Int32,Int,InventoryFailure.Step)] = [
             (1,0,.list),(17,0,.list),(2,0,.status),(4,0,.snapshotGone),
-            (5,1,.psRun),(5,4,.psTimeout),(5,3,.psResult),(5,5,.psResult),
-            (5,6,.psResult),(5,7,.psShape),(5,8,.psShape),(5,9,.psShape),
+            (24,1,.psRun),(24,4,.psTimeout),(24,3,.psResult),(24,5,.psResult),
+            (24,6,.psResult),(24,7,.psShape),(24,8,.psShape),(24,9,.psShape),
             (7,2,.pathCandidate),(19,0,.pathStatus),(20,0,.pathStatus),
             (9,0,.snapshot),(21,0,.selfPID),(22,0,.physical),
             (12,0,.signatureStatus),(13,0,.finalSnapshot),(15,0,.finalGone)
@@ -54,17 +54,17 @@ final class Process {
         var seen = Set<String>()
         for (scenario,mode,expected) in rows {
             fixtureSet(scenario); Process.mode=mode; Process.calls=0
-            do { _ = try supervisor.isQuiescent(); preconditionFailure("Expected \(expected)") }
+            do { _ = try supervisor.isQuiescent(); preconditionFailure("Expected \(expected), scenario=\(scenario), mode=\(mode)") }
             catch LegacySupervisorError.inspectionFailure(let detail) {
                 precondition(detail.step == expected && detail.target == .claude)
                 precondition(detail.phase == .observation && detail.pass == 0)
                 precondition(detail.wire.utf8.count < 472)
                 seen.insert(detail.step.rawValue)
-                if scenario==5 {
-                    // Preserve the original EACCES and subcall detail, even when
-                    // ps fails before the existing confirmed-gone status check.
+                if scenario==24 {
+                    // Preserve the original EACCES, ps failure, and subcall
+                    // detail while confirming that the original PID is live.
                     precondition(detail.rc==EACCES && detail.call==2 && detail.raw == -17)
-                    precondition(fixtureCount(0)==1 && Process.calls==1)
+                    precondition(detail.identity==0 && fixtureCount(0)==2 && Process.calls==1)
                 }
                 if expected == .psRun { precondition(detail.ps==1 && detail.psCode==Int64(EPERM)) }
                 if expected == .psTimeout { precondition(detail.ps==4) }
@@ -90,6 +90,26 @@ final class Process {
 
         // Confirmed exits/unrelated paths still skip; definite identity/signature
         // failures retain their existing distinct errors and never gain authority.
+        // A failed ps discovery followed by a proven exit is not a cleanup
+        // failure. Reuse, a still-live PID, and an unreadable status retain the
+        // ps diagnostic and remain unconfirmed.
+        fixtureSet(23); Process.mode=1; Process.calls=0
+        let exitedAfterFailedPS = try supervisor.isQuiescent()
+        precondition(exitedAfterFailedPS)
+        precondition(fixtureCount(0)==2 && fixtureCount(2)==0 && Process.calls==1)
+        for (scenario, identity) in [(24,Int32(0)), (25,Int32(EPERM)), (26,Int32(ESTALE))] {
+            fixtureSet(Int32(scenario)); Process.mode=1; Process.calls=0
+            do { _ = try supervisor.isQuiescent(); preconditionFailure("Expected preserved ps failure") }
+            catch LegacySupervisorError.inspectionFailure(let detail) {
+                precondition(detail.step == .psRun && detail.ps == 1)
+                precondition(detail.rc == EACCES && detail.identity == identity)
+                precondition(fixtureCount(0)==2 && fixtureCount(2)==0 && Process.calls==1)
+            }
+        }
+        fixtureSet(5); Process.mode=0
+        let exitedAfterSuccessfulPS = try supervisor.isQuiescent()
+        precondition(exitedAfterSuccessfulPS)
+        precondition(fixtureCount(0)==2 && fixtureCount(2)==0)
         for scenario: Int32 in [3,6,8,11,14,18] {
             fixtureSet(scenario); Process.mode=0
             let empty = try supervisor.isQuiescent(); precondition(empty)
@@ -135,6 +155,6 @@ final class Process {
         let wire=NativeCleanupDiagnostic.inspectionFailure(extreme).wire
         precondition(wire.utf8.count < 512 && wire.split(separator:"\n").count==2)
         precondition(!wire.contains("/Applications/") && !wire.contains("PATH"))
-        print("Inventory evidence: all 16 sources, four stop phases, PS validity/exit-race, unchanged refusal/skip behavior and worst-case \(wire.utf8.count)-byte transport passed; zero real process effects.")
+        print("Inventory evidence: all 16 sources, four stop phases, PS failure/exit identity recheck, unchanged refusal/skip behavior and worst-case \(wire.utf8.count)-byte transport passed; zero real process effects.")
     }
 }

@@ -13,7 +13,7 @@ Guard integration: guard-contract.md is the approved business boundary; guard-ac
 
 network-protection-acceptance.md: CCBaga Network Skill 的源码事实、离线测试范围与 VPS/客户端/TUN/DNS/WebRTC/IPv6 实机验收步骤；离线结果不得表述为已部署或网络已验证。
 
-guard-executor-integration.md: Mac 静态执行器、Windows WFP 基础、运行节拍与未验收边界。
+guard-executor-integration.md: Mac 静态执行器、Windows WFP 基础、运行节拍、Gate pending 关闭屏障、controller 崩溃后监督缺口/方案及未验收边界。
 windows-offline-handoff.md: Windows 源码接手、隔离依赖与只执行指定离线检查的步骤。
 windows-managed-launch.md: Windows专用账户封存目标、挂起到Job启动、可信pipe、子进程隐私环境和退出读回候选；未接生产且需Windows实机验收。
 

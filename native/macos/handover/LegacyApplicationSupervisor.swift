@@ -292,6 +292,20 @@ final class LegacyApplicationSupervisor {
                 let discovery: (path: String, bytes: Int32)
                 do { discovery = try candidatePathFromPS(pid) }
                 catch LegacySupervisorError.inspectionFailure(var evidence) {
+                    // `ps` is discovery only. If it fails, recheck the PID
+                    // against the identity captured before the snapshot so a
+                    // process that exited during discovery is not reported as
+                    // an inspection failure. A live, reused, or unreadable PID
+                    // still fails closed, retaining the original `ps` detail.
+                    var expected = lg_process()
+                    expected.pid = pid; expected.uid = inventory.uid
+                    expected.birth_sec = inventory.birth_sec
+                    expected.birth_usec = inventory.birth_usec
+                    var after = lg_status()
+                    let afterStatus = lg_process_status(pid, &after)
+                    let identityResult = lg_process_status_identity(&expected, afterStatus, &after)
+                    evidence.identity = identityResult
+                    if Self.postSignatureIdentity(identityResult) == .exited { continue }
                     evidence.rc = result; evidence.call = detail.call; evidence.raw = detail.result
                     evidence.os = detail.error; evidence.value = detail.value
                     throw LegacySupervisorError.inspectionFailure(evidence)
