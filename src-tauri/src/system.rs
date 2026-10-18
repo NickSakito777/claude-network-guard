@@ -1,6 +1,6 @@
-// [INPUT]: macOS/Linux/Windows 电脑设置桥与 Tauri 后台任务。
-// [OUTPUT]: 电脑状态查询、时区与语言应用、定位关闭和系统设置入口。
-// [POS]: 独立于清理的命令边界；所有成功状态来自原生核验。
+// [INPUT]: macOS/Linux/Windows 电脑设置桥、Cleaner 租约、Guard 状态与 Tauri 后台任务。
+// [OUTPUT]: 电脑状态查询、系统设置入口，以及当前可用目标均锁定后的时区/语言/定位/区域修改。
+// [POS]: 只读事实和修复设置入口保持可用；系统变更要求已配置目标覆盖且清理已确认。
 // [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 #[cfg(target_os = "linux")]
 use crate::linux::*;
@@ -39,24 +39,36 @@ pub async fn system_open_settings(pane: String) -> Result<serde_json::Value, Str
     .await
 }
 #[tauri::command]
-pub async fn system_set_language(language: String) -> Result<serde_json::Value, String> {
+pub async fn system_set_language(
+    app: tauri::AppHandle,
+    language: String,
+) -> Result<serde_json::Value, String> {
     run(move || {
+        let _operation = crate::cleaner::fully_guarded_lease(&app)?;
         let language = CString::new(language).map_err(|_| "语言无效。")?;
         decode(unsafe { rf_system_language(language.as_ptr()) })
     })
     .await
 }
 #[tauri::command]
-pub async fn system_set_timezone(timezone: String) -> Result<serde_json::Value, String> {
+pub async fn system_set_timezone(
+    app: tauri::AppHandle,
+    timezone: String,
+) -> Result<serde_json::Value, String> {
     run(move || {
+        let _operation = crate::cleaner::fully_guarded_lease(&app)?;
         let timezone = CString::new(timezone).map_err(|_| "时区无效。")?;
         decode(unsafe { rf_system_timezone(timezone.as_ptr()) })
     })
     .await
 }
 #[tauri::command]
-pub async fn system_disable_location() -> Result<serde_json::Value, String> {
-    run(|| decode(unsafe { rf_system_location() })).await
+pub async fn system_disable_location(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    run(move || {
+        let _operation = crate::cleaner::fully_guarded_lease(&app)?;
+        decode(unsafe { rf_system_location() })
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -81,9 +93,13 @@ mod tests {
 }
 
 #[tauri::command]
-pub async fn system_set_region(region: String) -> Result<serde_json::Value, String> {
+pub async fn system_set_region(
+    app: tauri::AppHandle,
+    region: String,
+) -> Result<serde_json::Value, String> {
     let region = crate::regions::find(&region)?;
     run(move || {
+        let _operation = crate::cleaner::fully_guarded_lease(&app)?;
         let zone = CString::new(region.timezone).unwrap();
         let language = CString::new(region.language).unwrap();
         let locale = CString::new(region.locale).unwrap();

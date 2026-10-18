@@ -236,12 +236,12 @@ h3 { margin: 0; font-size: 13px; font-weight: 500; }
 .update-notes p { margin-top: 12px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; line-height: 1.7; }
 
 /* ----- Landing：同源斜纹带、7px 点阵与满宽内容面；装饰只归壳和标题 ----- */
-.system-page > .cleanup-title, .cleanup-scroll > .cleanup-title, .identity-page > .cleanup-title {
+.system-page > .cleanup-title, .cleanup-scroll > .cleanup-title, .identity-page > .cleanup-title, .guard-page > .cleanup-title {
   position: relative; isolation: isolate; min-height: 132px; padding: 32px 28px;
   margin: 0 -28px 44px; width: auto; max-width: none; justify-content: center;
   border-bottom: 1px solid var(--landing-line); background: var(--background);
 }
-.system-page > .cleanup-title::before, .cleanup-scroll > .cleanup-title::before, .identity-page > .cleanup-title::before {
+.system-page > .cleanup-title::before, .cleanup-scroll > .cleanup-title::before, .identity-page > .cleanup-title::before, .guard-page > .cleanup-title::before {
   content: ''; position: absolute; inset: 0; z-index: -1; pointer-events: none;
   background-image: var(--landing-dots),
     radial-gradient(ellipse at 14% 45%,color-mix(in srgb,var(--primary) 8%,transparent) 0 12%,transparent 30%),
@@ -250,7 +250,7 @@ h3 { margin: 0; font-size: 13px; font-weight: 500; }
   background-size: 7px 7px,100% 100%,100% 100%,100% 100%; opacity: .55;
   mask-image: linear-gradient(90deg,transparent,#000 20%,#000 80%,transparent);
 }
-.system-page > .cleanup-title::after, .cleanup-scroll > .cleanup-title::after, .identity-page > .cleanup-title::after {
+.system-page > .cleanup-title::after, .cleanup-scroll > .cleanup-title::after, .identity-page > .cleanup-title::after, .guard-page > .cleanup-title::after {
   content: ''; position: absolute; inset-inline: 0; height: var(--landing-band); bottom: calc(-1 * var(--landing-band));
   border-bottom: 1px solid var(--landing-line); background-image: var(--landing-hatch); pointer-events: none;
 }
@@ -279,7 +279,7 @@ h3 { margin: 0; font-size: 13px; font-weight: 500; }
 .skill-prompt-surface textarea { display: block; min-height: 104px; padding: 16px; border: 0; border-radius: 0; background: transparent; box-shadow: none; font-size: 12px; line-height: 1.8; }
 .skill-prompt-actions { display: flex; justify-content: flex-end; padding: 12px 16px; border-top: 1px solid var(--landing-line); background: #fafaf8; }
 @media(max-width:900px) {
-  .system-page > .cleanup-title, .cleanup-scroll > .cleanup-title, .identity-page > .cleanup-title { margin-inline: -22px; padding-inline: 22px; }
+  .system-page > .cleanup-title, .cleanup-scroll > .cleanup-title, .identity-page > .cleanup-title, .guard-page > .cleanup-title { margin-inline: -22px; padding-inline: 22px; }
   .network-page { padding: 0 0 24px; }
   .network-page > .cleanup-title { margin-inline: 0; }
   .network-step { padding: 24px 16px; }
@@ -387,9 +387,61 @@ h3 { margin: 0; font-size: 13px; font-weight: 500; }
 
 @media(prefers-reduced-motion:reduce) { .identity-card { transition:none; } }
 
+/* ----- Guard 首页：状态只取自原生快照，事件日志保持有界 ----- */
+.app-brand-mark { display:grid; place-items:center; width:28px; height:28px; flex:0 0 auto; border:1px solid var(--landing-line); border-radius:8px; background:#fff; }
+.guard-page { display:flex; flex:1; min-height:0; flex-direction:column; overflow:auto; padding:0 28px 28px; }
+.guard-page > .cleanup-title { margin:0 -28px var(--landing-band); }
+.guard-page > .cleanup-title p { margin-top:5px; color:var(--muted-foreground); font-size:12px; }
+.guard-grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.1fr); gap:16px; align-items:start; }
+.guard-card { min-width:0; border-radius:0; border-color:var(--landing-line); box-shadow:none; }
+.guard-card .system-card-title { display:flex; align-items:center; gap:9px; }
+.guard-card-body { padding:20px; }
+.guard-state-dot { display:inline-block; width:9px; height:9px; flex:0 0 9px; border-radius:50%; background:#a1a1a1; }
+.guard-state-dot.verified { background:#16a34a; box-shadow:0 0 0 3px #16a34a22; }
+.guard-state-value { margin:0 0 6px; font-size:24px; font-weight:550; letter-spacing:-.4px; overflow-wrap:anywhere; }
+.guard-state-value.verified { color:#15803d; }
+.guard-reason { margin:0 0 12px; color:var(--muted-foreground); font-size:12px; line-height:1.7; overflow-wrap:anywhere; }
+.guard-action-row { display:flex; flex-wrap:wrap; gap:8px; padding:10px 0 0; }
+.guard-action-row button { max-width:100%; white-space:normal; }
+.guard-targets { display:grid; gap:4px; min-width:0; margin:18px 0 0; padding:14px 0 0; border:0; border-top:1px solid var(--landing-line); }
+.guard-targets legend { padding:0 0 8px; font-size:12px; font-weight:550; }
+.guard-target { display:flex; align-items:flex-start; gap:10px; padding:9px 8px; border-bottom:1px solid var(--landing-line); cursor:pointer; }
+.guard-target:last-child { border-bottom:0; }
+.guard-target input { margin:3px 0 0; accent-color:var(--foreground); }
+.guard-target input:disabled { cursor:default; }
+.guard-target-copy { display:flex; min-width:0; flex:1; justify-content:space-between; gap:12px; font-size:12px; }
+.guard-target-copy strong { font-weight:500; overflow-wrap:anywhere; }
+.guard-target-meta { display:flex; min-width:0; max-width:58%; flex-direction:column; align-items:flex-end; gap:4px; }
+.guard-target-meta small { color:var(--muted-foreground); font-size:11px; text-align:right; overflow-wrap:anywhere; }
+.guard-target-meta .guard-target-reason { max-width:100%; line-height:1.55; }
+.guard-target.unavailable { color:var(--muted-foreground); cursor:default; }
+.guard-empty { padding:8px 0; color:var(--muted-foreground); font-size:12px; }
+.guard-environment-card { grid-column:1; }
+.guard-environment { margin:0; padding:0 20px; }
+.guard-environment > div { display:grid; grid-template-columns:minmax(100px,34%) minmax(0,1fr); gap:12px; padding:13px 0; border-bottom:1px solid var(--landing-line); font-size:12px; }
+.guard-environment > div:last-child { border-bottom:0; }
+.guard-environment dt { color:var(--muted-foreground); }
+.guard-environment dd { margin:0; font:12px ui-monospace,SFMono-Regular,Menlo,monospace; overflow-wrap:anywhere; user-select:text; }
+.guard-events-card { grid-column:2; grid-row:1 / span 2; }
+.guard-terminal { max-height:320px; min-height:180px; overflow:auto; padding:14px 16px; background:#171717; color:#e7e7e7; font:11px/1.8 ui-monospace,SFMono-Regular,Menlo,monospace; user-select:text; }
+.guard-terminal-empty { color:#a3a3a3; }
+.guard-event { display:grid; grid-template-columns:42px 58px minmax(0,1fr); gap:10px; padding:2px 0; }
+.guard-event-sequence,.guard-event-level { color:#a3a3a3; }
+.guard-event-message { overflow-wrap:anywhere; white-space:pre-wrap; }
+@media(max-width:900px) { .guard-page { padding-inline:22px; } .guard-grid { grid-template-columns:minmax(0,1fr); } .guard-environment-card,.guard-events-card { grid-column:1; grid-row:auto; } .guard-terminal { max-height:260px; } }
+@media(max-width:560px) { .guard-card-body { padding:16px; } .guard-environment { padding-inline:16px; } .guard-environment > div { grid-template-columns:minmax(0,1fr); gap:5px; } .guard-target-copy { flex-direction:column; gap:3px; } .guard-target-meta { max-width:none; align-items:flex-start; } .guard-target-meta small { text-align:left; } }
+
 /* ----- 永久删除使用明确危险色与 AlertDialog，取消始终是安全默认值 ----- */
 .identity-delete-warning { display:flex; align-items:center; gap:12px; padding:14px 16px; border:1px solid #efc1b8; border-radius:8px; background:#fff3ef; color:#a73524; }
 .identity-delete-warning > span { display:grid; place-items:center; flex:0 0 24px; height:24px; border:1.5px solid currentColor; border-radius:50%; font-size:15px; font-weight:650; }
 .identity-delete-warning strong { font-size:12px; font-weight:550; line-height:1.6; }
 .identity-delete-alert .identity-delete-button { background:linear-gradient(#c94b3a,#b73828); color:#fff; border-color:#a62b20; }
 .identity-delete-alert .identity-delete-button:hover { background:linear-gradient(#d65341,#c43e2d); }
+
+/* Guard identity linkage and read-only privacy diagnostics. */
+.identity-library-controls { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.identity-browser-badge { display:inline-block; padding:2px 6px; border-radius:4px; font-size:11px; background:var(--surface-muted, #eee); }
+.guard-privacy-card { margin-top:16px; padding:16px; }
+.guard-privacy-card details { margin-top:12px; }
+.guard-privacy-card summary { cursor:pointer; }
+.guard-privacy-card section { margin-top:12px; }

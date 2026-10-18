@@ -1,6 +1,6 @@
 /**
  * [INPUT]: Tauri 官方 mockIPC、真实身份组件与虚构的内存状态。
- * [OUTPUT]: 40 个虚构身份、命令审计与失败/恢复场景，供无头浏览器验证。
+ * [OUTPUT]: 40 个虚构身份、浏览器联动/资料删除确认、命令审计与失败/恢复场景，供无头浏览器验证。
  * [POS]: 独立测试入口；没有原生命令、真实目录、账号或网络，生产 rollup 不包含此入口。
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -14,7 +14,7 @@ import '../src/index.css';
 import '../src/style.css';
 const id=(number:number)=>number.toString(16).padStart(32,'0');
 const user={present:true,display_name:'Fixture user',email:'fixture@example.invalid',organization:'Fixture team',unavailable:false};
-const state:IdentityState={active:'current',recovery:null,running:true,current:{...user},records:Array.from({length:40},(_,n)=>({id:id(n+1),name:`Identity ${n+1}`,saved_at:1780000000000+n,bytes:2048,policy:{...defaultPolicy}}))};
+const state:IdentityState={browser:{enabled:false,bound_ids:[id(3)]},browser_warning:null,active:'current',recovery:null,running:true,current:{...user},records:Array.from({length:40},(_,n)=>({id:id(n+1),name:`Identity ${n+1}`,saved_at:1780000000000+n,bytes:2048,policy:{...defaultPolicy}}))};
 const commands:{command:string;args:any}[]=[];
 let fail='';
 const fixture={commands,state,language:setLocale,setFailure:(command:string)=>{fail=command;},recover:()=>{state.recovery=id(1);}};
@@ -24,6 +24,8 @@ mockIPC((command,args:any)=>{
  if(fail===command){fail='';throw Error('fixture operation failed');}
  if(command==='identities_read')return structuredClone(state);
  if(command==='claude_cli_read')return {method:'',path:'',version:''};
+ if(command==='identities_browser'){state.browser.enabled=args.enabled;return structuredClone(state);}
+ if(command==='browser_launch'){state.browser_warning=null;return undefined;}
  if(command==='cleaner_stop'){state.running=false;return {running:false};}
  if(command==='identities_switch'){
   if(args.recover){state.recovery=null;state.current={...user};return structuredClone(state);}

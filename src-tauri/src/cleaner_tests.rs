@@ -1,8 +1,34 @@
 // [INPUT]: 隔离临时目录/Windows 子进程 AppData、脱敏配置、清理事务与当前用户官方原生 CLI 版本路径。
-// [OUTPUT]: 白名单、文件夹范围、配置保留、组织检索、直接删除、大目录完整统计、读失败拒绝快照、快照保护、真实日志次序与原生版本/可丢弃 Node CLI 进程的识别/终止/隔离验证。
+// [OUTPUT]: Cleaner 白名单/快照/进程回归与共享 operation lease 的互斥、释放和等待验证。
 // [POS]: 仅操作测试数据，进程样本由本机编译并握手确认启动，避免重用 Apple 平台二进制，不访问现有 Claude 数据。
 // [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 use super::*;
+
+#[test]
+fn operation_lease_reuses_the_shared_non_reentrant_lock() {
+    let cleaner = Cleaner::default();
+    let first = cleaner.lease().unwrap();
+    assert!(cleaner.lease().is_err());
+    drop(first);
+    assert!(cleaner.lease().is_ok());
+}
+
+#[test]
+fn waiting_operation_lease_starts_after_the_current_owner_releases() {
+    let cleaner = std::sync::Arc::new(Cleaner::default());
+    let first = cleaner.lease().unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    let waiting_cleaner = cleaner.clone();
+    let waiter = std::thread::spawn(move || {
+        let _lease = waiting_cleaner.lease_wait();
+        send.send(()).unwrap();
+    });
+    assert!(receive.try_recv().is_err());
+    drop(first);
+    receive.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+    waiter.join().unwrap();
+}
+
 #[cfg(windows)]
 fn junction(source: &Path, target: &Path) {
     assert!(std::process::Command::new("cmd.exe").args(["/D", "/C", "mklink", "/J"]).arg(target.to_string_lossy().replace('/', "\\")).arg(source.to_string_lossy().replace('/', "\\")).output().unwrap().status.success());
@@ -665,4 +691,22 @@ fn windows_redirected_appdata_remains_whitelisted() {
     let sources = super::identity::sources(&root, &crate::identities::Policy::default()).unwrap();
     assert!(sources.iter().any(|source| source.path == Path::new(&cookie.path)));
     assert!(sources.iter().all(|source| super::identity::allowed(&root, source)));
+}
+
+
+#[test]
+fn operation_lease_shutdown_blocks_new_work_but_allows_cleanup_and_retry() {
+    let cleaner = Cleaner::default();
+    let running = cleaner.lease().unwrap();
+    cleaner.begin_shutdown();
+    assert!(!cleaner.shutdown_ready());
+    assert!(cleaner.lease().is_err());
+    drop(running);
+    assert!(cleaner.shutdown_ready());
+    let cleanup = cleaner.lease_wait();
+    assert!(!cleaner.shutdown_ready());
+    drop(cleanup);
+    cleaner.cancel_shutdown();
+    assert!(!cleaner.shutdown_ready());
+    assert!(cleaner.lease().is_ok());
 }

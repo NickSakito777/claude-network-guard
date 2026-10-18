@@ -1,10 +1,29 @@
 // [INPUT]: 本机指纹引擎（优先 /Applications/CCBaga-B.app，回退 ~/Applications）、配置/资料边界、真实浏览器观测、宿主界面语言与共享操作日志。
-// [OUTPUT]: 浏览器设置/启动/清理与环境核验；宿主重启重新连接现有浏览器，回报时间明确标识通讯状态；上下文提供当前界面语言；launch.args 共用资料与指纹参数。
-// [POS]: 独立浏览器模块的唯一编排入口；改变资料前必须退出浏览器；不自行改系统默认浏览器，只发起系统确认。
+// [OUTPUT]: 有界绑定身份上下文与浏览器设置/启动/清理和环境核验；宿主重启重新连接现有浏览器，回报时间明确标识通讯状态；上下文提供当前界面语言；launch.args 与 SQLite 当前身份共用独占资料/指纹参数，恢复期间阻断启动。
+// [POS]: 身份绑定资料的唯一浏览器入口；保持 Guard 变更/启动闸门，未核验目标不得启动，退出保持可用。
 // [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 pub(crate) mod config;
+mod launch;
 mod network;
 mod profile;
+mod workspaces;
+use launch::launch_locked;
+#[cfg(test)]
+pub(crate) use launch::require_startable_identity as test_require_startable_identity;
+pub(crate) use workspaces::delete_saved;
+pub(crate) use workspaces::{identity_action, IdentityActionError};
+#[cfg(test)]
+pub(crate) use workspaces::{run_action as test_run_identity_action, reconcile_with as test_reconcile_identity};
+pub(crate) fn pending_warning(app: &tauri::AppHandle) -> Result<Option<String>, String> {
+    workspaces::pending_warning(&root(app)?, &crate::cleaner::identity::root()?)
+}
+pub(crate) fn configure_identity(
+    app: &tauri::AppHandle,
+    reporter: &Reporter,
+    action: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    workspaces::transition(app, reporter, true, || action().map_err(IdentityActionError::safe))
+}
 #[cfg(target_os = "linux")]
 include!("linux.rs");
 #[cfg(target_os = "windows")]
@@ -12,6 +31,8 @@ include!("windows.rs");
 pub(crate) mod server;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod workspace_tests;
 #[cfg(target_os = "linux")]
 use crate::linux::*;
 #[cfg(target_os = "windows")]
@@ -35,7 +56,6 @@ use tauri::{ipc::Channel, Manager};
 #[cfg(target_os = "macos")]
 extern "C" {
     fn rf_browser_register(path: *const c_char) -> *mut c_char;
-    fn rf_browser_app_running(bundle: *const c_char) -> *mut c_char;
     fn rf_browser_default_read(bundle: *const c_char) -> *mut c_char;
     fn rf_browser_set_default(bundle: *const c_char) -> *mut c_char;
     fn rf_system_region(language: *const c_char, locale: *const c_char) -> *mut c_char;
@@ -45,6 +65,7 @@ extern "C" {
 #[derive(Default)]
 pub struct Browser {
     gate: Mutex<()>,
+    pub(crate) warning: Mutex<Option<String>>,
     session: Mutex<Option<Session>>,
     host: Mutex<Option<Exit>>,
 }
@@ -55,6 +76,7 @@ struct Session {
 }
 #[derive(Clone, Serialize)]
 pub struct Context {
+    identity: crate::identities::browser_link::BrowserIdentity,
     ui_language: String,
     exit_services: &'static [&'static str],
     region: Option<&'static crate::regions::Region>,
@@ -73,12 +95,23 @@ pub struct Snapshot {
     engine_ready: bool,
     running: bool,
     profile: String,
+    identity_linked: bool,
     cache: Vec<profile::CacheItem>,
     cache_error: String,
     report: Option<Report>,
     report_received_at: Option<u64>,
     machine_exit: Option<Exit>,
     checks: Vec<Check>,
+}
+fn identity_context(
+    app: &tauri::AppHandle,
+) -> Result<crate::identities::browser_link::BrowserIdentity, String> {
+    let root = root(app)?;
+    let vault = root
+        .parent()
+        .ok_or("应用目录不可用。")?
+        .join("identity-vault");
+    workspaces::database(&root)?.browser_identity(&vault, &crate::cleaner::identity::root()?)
 }
 fn root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(app
@@ -115,12 +148,6 @@ fn register(engine: &Path) -> Result<(), String> {
 fn bundle_id() -> CString {
     CString::new(BROWSER_ID).unwrap()
 }
-#[cfg(target_os = "macos")]
-fn app_running() -> Result<bool, String> {
-    let id = bundle_id();
-    let state: serde_json::Value = decode(unsafe { rf_browser_app_running(id.as_ptr()) })?;
-    Ok(state["running"].as_bool().unwrap_or(false))
-}
 /// CCBaga-B 入口（launcher/CCBrowser.c）读取的参数：与实测启动相同，只去掉起始页。
 fn write_launch_args(
     root: &Path,
@@ -129,29 +156,22 @@ fn write_launch_args(
     profile: &Path,
     version: &str,
 ) -> Result<(), String> {
-    use std::io::Write;
-    #[cfg(unix)]
-    use std::os::unix::fs::OpenOptionsExt;
     let mut args = config::arguments(config, machine, profile, "", version);
     args.pop();
-    fs::create_dir_all(root).map_err(|_| "无法创建浏览器目录。")?;
-    let target = root.join("launch.args");
-    let temp = root.join("launch.args.tmp");
-    let mut options = fs::OpenOptions::new();
-    options.create(true).write(true).truncate(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options.open(&temp).map_err(|_| "无法写入浏览器启动参数。")?;
-    file.write_all((args.join("\n") + "\n").as_bytes())
-        .map_err(|_| "无法写入浏览器启动参数。")?;
-    fs::rename(&temp, &target).map_err(|_| "无法写入浏览器启动参数。")?;
-    Ok(())
+    crate::identities::private::directory(root)?;
+    crate::identities::private::write(
+        &root.join("launch.args"),
+        (args.join("\n") + "\n").as_bytes(),
+    )?;
+    workspaces::unblock(root)
 }
 fn refresh_launch_args(app: &tauri::AppHandle) -> Result<(), String> {
     let root = root(app)?;
-    let profile = root.join("profile");
+    workspaces::ensure(&root)?;
+    let settings = workspaces::scope(&root)?;
+    let profile = settings.join("profile");
     profile::check_path(&root, &profile)?;
-    let config = config::load(&root)?;
+    let config = config::load(&workspaces::scope(&root)?)?;
     let machine = config::machine()?;
     config.validate(&machine)?;
     let engine = engine(app)?;
@@ -161,7 +181,8 @@ fn refresh_launch_args(app: &tauri::AppHandle) -> Result<(), String> {
         &machine,
         &profile,
         &packaged_version(app, &engine),
-    )
+    )?;
+    workspaces::unblock(&root)
 }
 /// 新建起始页会话：随机令牌回环服务 + 写入 browser/start.url（0600），供 CCBrowser 入口在每次全新启动时作为首个标签打开。
 fn open_session(
@@ -182,6 +203,7 @@ fn open_session(
     let token = server::nonce()?;
     let page = format!("http://127.0.0.1:{port}/{token}/browser.html");
     let context = Context {
+        identity: identity_context(app)?,
         ui_language: crate::ui_language::ui_language_read(app.clone()),
         exit_services: &network::SERVICES,
         region: crate::regions::matching(&config.language(machine), &config.timezone(machine)),
@@ -213,7 +235,7 @@ fn open_session(
 fn renew_session(app: &tauri::AppHandle) {
     let result = (|| -> Result<(), String> {
         let root = root(app)?;
-        let config = config::load(&root)?;
+        let config = config::load(&workspaces::scope(&root)?)?;
         let machine = config::machine()?;
         config.validate(&machine)?;
         let engine = engine(app)?;
@@ -243,20 +265,27 @@ pub fn companion(app: tauri::AppHandle) {
 }
 #[cfg(target_os = "macos")]
 fn start_companion(app: &tauri::AppHandle) -> Result<(), String> {
+    let _operation = app.state::<crate::cleaner::Cleaner>().lease()?;
+    crate::guard::require_running_target(app, "ccbaga_browser")?;
+    workspaces::ready(&root(app)?)?;
+    launch::require_startable_identity(identity_context(app).map(|identity| identity.status))?;
     let browser = installed().ok_or("未安装 /Applications/CCBaga-B.app。")?;
     let state = app.state::<Browser>();
     let _guard = state.gate.lock().unwrap();
     let root = root(app)?;
-    let profile = root.join("profile");
+    workspaces::ensure(&root)?;
+    let settings = workspaces::scope(&root)?;
+    let profile = settings.join("profile");
     profile::check_path(&root, &profile)?;
-    let config = config::load(&root)?;
+    let config = config::load(&workspaces::scope(&root)?)?;
     let machine = config::machine()?;
     config.validate(&machine)?;
     // 先刷新参数：浏览器已由 CCBaga-B 入口先行启动时，下一次启动也能沿用指纹参数。
     write_launch_args(&root, &config, &machine, &profile, &version(&browser))?;
     let page = open_session(app, &config, &machine, version(&browser))?;
-    if app_running()? || profile::running(&profile)? {
+    if profile::running(&profile)? {
         // 宿主重装/重启后端口与令牌变化：给运行中的浏览器打开新的实测页，避免旧标签失联。
+        launch::require_startable_identity(identity_context(app).map(|identity| identity.status))?;
         let mut child = Command::new(browser.join("Contents/MacOS/Chromium"))
             .arg(format!("--user-data-dir={}", profile.display()))
             .args(["--profile-directory=Default", &page])
@@ -272,6 +301,7 @@ fn start_companion(app: &tauri::AppHandle) -> Result<(), String> {
     }
     profile::preferences(&profile, &config, &machine)?;
     register(&browser)?;
+    launch::require_startable_identity(identity_context(app).map(|identity| identity.status))?;
     let status = Command::new("/usr/bin/open")
         .args(["-g", "-a"])
         .arg(&browser)
@@ -312,6 +342,7 @@ pub async fn browser_default_read() -> Result<DefaultBrowser, String> {
 #[tauri::command]
 pub async fn browser_set_default(app: tauri::AppHandle) -> Result<DefaultBrowser, String> {
     run(move || {
+        let _operation = crate::cleaner::guarded_lease(&app, "ccbaga_browser")?;
         let browser = installed()
             .ok_or("未找到 /Applications/CCBaga-B.app，请先运行 bun run install:apps。")?;
         let copy = root(&app)?.join("engine/Browser.app");
@@ -404,10 +435,11 @@ fn version(engine: &Path) -> String {
 }
 fn snapshot(app: &tauri::AppHandle) -> Result<Snapshot, String> {
     let root = root(app)?;
-    let profile = root.join("profile");
+    let settings = workspaces::scope(&root)?;
+    let profile = settings.join("profile");
     profile::check_path(&root, &profile)?;
     let machine = config::machine()?;
-    let config = config::load(&root)?;
+    let config = config::load(&settings)?;
     config.validate(&machine)?;
     let engine = engine(app)?;
     let engine_version = packaged_version(app, &engine);
@@ -443,6 +475,7 @@ fn snapshot(app: &tauri::AppHandle) -> Result<Snapshot, String> {
         engine_version,
         running,
         profile: profile.to_string_lossy().into(),
+        identity_linked: workspaces::database(&root)?.browser_link()?.enabled,
         cache,
         cache_error,
         report,
@@ -460,19 +493,26 @@ async fn run<T: Send + 'static>(
 }
 #[tauri::command]
 pub async fn browser_read(app: tauri::AppHandle) -> Result<Snapshot, String> {
-    run(move || snapshot(&app)).await
+    run(move || {
+        let state = app.state::<Browser>();
+        let _guard = state.gate.lock().unwrap();
+        snapshot(&app)
+    })
+    .await
 }
 #[tauri::command]
 pub async fn browser_save(app: tauri::AppHandle, config: Config) -> Result<Snapshot, String> {
     run(move || {
+        let _operation = crate::cleaner::guarded_lease(&app, "ccbaga_browser")?;
         let state = app.state::<Browser>();
         let _guard = state.gate.lock().unwrap();
+        workspaces::ready(&root(&app)?)?;
         let root = root(&app)?;
-        if profile::running(&root.join("profile"))? {
+        if profile::running(&workspaces::scope(&root)?.join("profile"))? {
             return Err("先退出浏览器，再保存指纹设置。".into());
         }
         config.validate(&config::machine()?)?;
-        config::save(&root, &config)?;
+        config::save(&workspaces::scope(&root)?, &config)?;
         refresh_launch_args(&app)?;
         renew_session(&app);
         snapshot(&app)
@@ -485,89 +525,14 @@ pub async fn browser_launch(
     on_progress: Channel<Progress>,
 ) -> Result<Snapshot, String> {
     run(move || {
+        let _operation = app.state::<crate::cleaner::Cleaner>().lease()?;
         let state = app.state::<Browser>();
         let _guard = state.gate.lock().unwrap();
-        let log = Reporter::channel(Some(on_progress));
-        log.log(
-            "browser",
-            "running",
-            "检查独立浏览器配置与资料占用。",
-            0,
-            None,
-        );
-        let root = root(&app)?;
-        let profile = root.join("profile");
-        profile::check_path(&root, &profile)?;
-        let running = profile::running(&profile)?;
-        let config = config::load(&root)?;
-        let machine = config::machine()?;
-        config.validate(&machine)?;
-        let engine = prepare_engine(&app)?;
-        register(&engine)?;
-        let binary = binary(&engine);
-        if !binary.is_file() {
-            return Err("内置浏览器引擎不可用。".into());
-        }
-        write_launch_args(&root, &config, &machine, &profile, &version(&engine))?;
-        if !running {
-            profile::preferences(&profile, &config, &machine)?;
-        } else {
-            log.log(
-                "browser",
-                "running",
-                "浏览器正在运行：打开 Default 实测页，沿用当前进程参数，不改写正在使用的资料。",
-                0,
-                None,
-            );
-        }
-        *state.host.lock().unwrap() = None;
-        let page = open_session(&app, &config, &machine, version(&engine))?;
-        let file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(root.join("engine.log"))
-            .map_err(|_| "浏览器诊断日志不可用。")?;
-        let mut child = Command::new(binary)
-            .args(config::arguments(
-                &config,
-                &machine,
-                &profile,
-                &page,
-                &version(&engine),
-            ))
-            .stdin(Stdio::null())
-            .stdout(file.try_clone().map_err(|_| "浏览器日志不可用。")?)
-            .stderr(file)
-            .spawn()
-            .map_err(|_| "浏览器启动失败。")?;
-        for _ in 0..100 {
-            if profile::running(&profile)? {
-                log.log(
-                    "browser",
-                    "ok",
-                    "浏览器已启动，等待起始页上报真实指纹与出口。",
-                    0,
-                    None,
-                );
-                std::thread::spawn(move || {
-                    let _ = child.wait();
-                });
-                return snapshot(&app);
-            }
-            if child
-                .try_wait()
-                .map_err(|_| "无法读取浏览器状态。")?
-                .is_some()
-            {
-                *state.session.lock().unwrap() = None;
-                return Err("浏览器启动后立即退出，请检查引擎完整性。".into());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        std::thread::spawn(move || {
-            let _ = child.wait();
-        });
-        Err("浏览器仍在启动，请刷新状态。".into())
+        crate::guard::require_running_target(&app, "ccbaga_browser")?;
+        workspaces::reconcile(&root(&app)?, &crate::cleaner::identity::root()?)?;
+        let snapshot = launch_locked(&app, &Reporter::channel(Some(on_progress)))?;
+        *state.warning.lock().unwrap() = None;
+        Ok(snapshot)
     })
     .await
 }
@@ -576,7 +541,7 @@ pub async fn browser_quit(app: tauri::AppHandle) -> Result<Snapshot, String> {
     run(move || {
         let state = app.state::<Browser>();
         let _guard = state.gate.lock().unwrap();
-        profile::quit(&root(&app)?.join("profile"))?;
+        profile::quit(&workspaces::scope(&root(&app)?)?.join("profile"))?;
         renew_session(&app);
         snapshot(&app)
     })
@@ -589,9 +554,11 @@ pub async fn browser_clear(
     on_progress: Channel<Progress>,
 ) -> Result<Snapshot, String> {
     run(move || {
+        let _operation = crate::cleaner::guarded_lease(&app, "ccbaga_browser")?;
         let state = app.state::<Browser>();
         let _guard = state.gate.lock().unwrap();
-        let profile = root(&app)?.join("profile");
+        workspaces::ready(&root(&app)?)?;
+        let profile = workspaces::scope(&root(&app)?)?.join("profile");
         let log = Reporter::channel(Some(on_progress));
         log.log(
             "browser",
@@ -653,7 +620,9 @@ pub async fn browser_align(
     app: tauri::AppHandle,
     on_progress: Channel<Progress>,
 ) -> Result<Snapshot, String> {
-    let config = config::load(&root(&app)?)?;
+    let _operation = crate::cleaner::fully_guarded_lease(&app)?;
+    let settings = workspaces::scope(&root(&app)?)?;
+    let config = config::load(&settings)?;
     let exit = network::probe(&config.proxy).await?;
     if exit.country != "US" {
         return Err("实际代理出口不是美国，未修改机器。".into());
@@ -661,8 +630,10 @@ pub async fn browser_align(
     run(move || {
         let state = app.state::<Browser>();
         let _guard = state.gate.lock().unwrap();
+        workspaces::ready(&root(&app)?)?;
         let log = Reporter::channel(Some(on_progress));
-        if profile::running(&root(&app)?.join("profile"))? {
+        if workspaces::scope(&root(&app)?)? != settings { return Err("浏览器身份已变化，请重试。".into()); }
+        if profile::running(&settings.join("profile"))? {
             return Err("先退出浏览器，再对齐机器。".into());
         }
         let machine = config::machine()?;
@@ -707,7 +678,7 @@ pub async fn browser_align(
         config.follow_machine = true;
         config.language = "en-US".into();
         config.timezone = exit.timezone;
-        config::save(&root(&app)?, &config)?;
+        config::save(&workspaces::scope(&root(&app)?)?, &config)?;
         refresh_launch_args(&app)?;
         renew_session(&app);
         log.log(
@@ -727,13 +698,16 @@ pub async fn browser_align(
 pub async fn browser_rotate(app: tauri::AppHandle, region: String) -> Result<Snapshot, String> {
     let region = crate::regions::find(&region)?;
     run(move || {
+        let _operation = crate::cleaner::guarded_lease(&app, "ccbaga_browser")?;
         let state = app.state::<Browser>();
         let _guard = state.gate.lock().unwrap();
+        workspaces::ready(&root(&app)?)?;
         let root = root(&app)?;
-        let profile = root.join("profile");
+        let settings = workspaces::scope(&root)?;
+        let profile = settings.join("profile");
         profile::check_path(&root, &profile)?;
         profile::quit(&profile)?;
-        let mut config = config::load(&root)?;
+        let mut config = config::load(&workspaces::scope(&root)?)?;
         let old = config.seed;
         while config.seed == old || config.seed == 0 {
             let nonce = server::nonce()?;
@@ -746,7 +720,7 @@ pub async fn browser_rotate(app: tauri::AppHandle, region: String) -> Result<Sna
         // ----- 种子必须作用于 Canvas/布局，真实设备参数继续沿用 -----
         config.native_graphics = false;
         config.validate(&config::machine()?)?;
-        config::save(&root, &config)?;
+        config::save(&workspaces::scope(&root)?, &config)?;
         refresh_launch_args(&app)?;
         *state.host.lock().unwrap() = None;
         renew_session(&app);

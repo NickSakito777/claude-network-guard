@@ -1,6 +1,6 @@
 // [INPUT]: Windows Chromium 引擎、资源目录与共用资料/随机令牌会话。
-// [OUTPUT]: 本地引擎发现与启动、用户主动设置默认浏览器。
-// [POS]: browser 编排的 Windows 平台实现；只接收 URL/文件入口，不执行用户提供的 shell。
+// [OUTPUT]: Guard 核验后的本地引擎启动与默认浏览器注册。
+// [POS]: browser 编排的 Windows 平台实现；URI/启动入口在写资料或生成会话前共用原生 Guard 闸门。
 // [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 use std::os::windows::process::CommandExt;
 fn register(_: &Path) -> Result<(), String> {
@@ -115,14 +115,18 @@ pub fn open_urls(app: tauri::AppHandle, args: Vec<String>) {
 
 fn start_windows_companion(app: &tauri::AppHandle, urls: &[String]) -> Result<(), String> {
     crate::startup_trace("companion entry");
+    let _operation = app.state::<crate::cleaner::Cleaner>().lease()?;
+    crate::guard::require_running_target(app, "ccbaga_browser")?;
+    workspaces::ready(&root(app)?)?;
     let state = app.state::<Browser>();
     let _guard = state.gate.lock().unwrap();
     let engine = prepare_engine(app)?;
     crate::startup_trace("engine ready");
     let root = root(app)?;
-    let profile = root.join("profile");
+    let settings = workspaces::ensure(&root)?;
+    let profile = settings.join("profile");
     profile::check_path(&root, &profile)?;
-    let config = config::load(&root)?;
+    let config = config::load(&settings)?;
     crate::startup_trace("config ready");
     let machine = config::machine()?;
     crate::startup_trace("machine ready");
@@ -182,6 +186,7 @@ fn default_read() -> Result<DefaultBrowser, String> {
 #[tauri::command]
 pub async fn browser_set_default(app: tauri::AppHandle) -> Result<DefaultBrowser, String> {
     run(move || {
+        let _operation = crate::cleaner::guarded_lease(&app, "ccbaga_browser")?;
         prepare_engine(&app)?;
         register_default()?;
         crate::windows::open_external_url("ms-settings:defaultapps?registeredAppUser=CCBaga-B")?;

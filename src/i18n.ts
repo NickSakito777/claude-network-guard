@@ -24,15 +24,15 @@ export function translate(key:string,values:Values={},language:Locale=locale):st
   if(!key)return key;
   const entry=Object.prototype.hasOwnProperty.call(catalogs[language],key)?catalogs[language][key]:undefined;
   if(entry!==undefined)return entry.replace(/\{(\w+)\}/g,(slot,name)=>values[name]===undefined?slot:String(typeof values[name]==='string'?translate(values[name] as string,{},language):values[name]));
+  if(key.includes('\n'))return key.split('\n').map(line=>translate(line,{},language)).join('\n');
+  for(const template of templates){
+    const match=key.match(template.pattern);
+    if(match)return translate(template.key,Object.fromEntries(template.slots.map((slot,i)=>[slot,match[i+1]])),language);
+  }
   if(language==='en'){
-    for(const template of templates){
-      const match=key.match(template.pattern);
-      if(match)return translate(template.key,Object.fromEntries(template.slots.map((slot,i)=>[slot,match[i+1]])),language);
-    }
     if(key.startsWith('Error: '))return 'Error: '+translate(key.slice(7),{},language);
     if(key.includes('；'))return key.split('；').map(part=>translate(part,{},language)).join('; ');
     if(key.includes('：'))return key.split('：').map(part=>translate(part,{},language)).join(': ');
-    if(key.includes('\n'))return key.split('\n').map(line=>translate(line,{},language)).join('\n');
   }
   return key;
 }
@@ -40,7 +40,7 @@ export function setLocale(next:unknown){
   if(next!=='zh'&&next!=='en')return;
   if(typeof document!=='undefined'){
     document.documentElement.lang=next==='zh'?'zh-CN':'en';
-    document.title=translate(document.body.classList.contains('browser-surface')?'CCBaga-B · 环境核验':'CCBaga-A',{},next);
+    document.title=translate(document.body.classList.contains('browser-surface')?'CCBaga-B · 环境核验':'Guard',{},next);
   }
   if(locale===next)return;
   locale=next;listeners.forEach(listener=>listener());

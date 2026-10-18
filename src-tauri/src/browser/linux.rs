@@ -1,6 +1,6 @@
 // [INPUT]: libexec 隔离的 Linux Chromium、兼容源码/Arch 资源目录、XDG 桌面入口与共用资料/随机令牌会话。
-// [OUTPUT]: 本地引擎发现与启动、用户主动设置默认浏览器。
-// [POS]: browser 编排的 Linux 平台实现；只接收 URL/文件入口，不执行用户提供的 shell。
+// [OUTPUT]: Guard 核验后的本地引擎启动与默认浏览器注册。
+// [POS]: browser 编排的 Linux 平台实现；URI/启动入口在写资料或生成会话前共用原生 Guard 闸门。
 // [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 fn register(_: &Path) -> Result<(), String> {
     Ok(())
@@ -72,13 +72,17 @@ pub fn open_urls(app: tauri::AppHandle, args: Vec<String>) {
     });
 }
 fn start_linux_companion(app: &tauri::AppHandle, urls: &[String]) -> Result<(), String> {
+    let _operation = app.state::<crate::cleaner::Cleaner>().lease()?;
+    crate::guard::require_running_target(app, "ccbaga_browser")?;
+    workspaces::ready(&root(app)?)?;
     let state = app.state::<Browser>();
     let _guard = state.gate.lock().unwrap();
     let engine = prepare_engine(app)?;
     let root = root(app)?;
-    let profile = root.join("profile");
+    let settings = workspaces::ensure(&root)?;
+    let profile = settings.join("profile");
     profile::check_path(&root, &profile)?;
-    let config = config::load(&root)?;
+    let config = config::load(&settings)?;
     let machine = config::machine()?;
     config.validate(&machine)?;
     if !profile::running(&profile)? {
@@ -136,6 +140,7 @@ fn default_read() -> Result<DefaultBrowser, String> {
 #[tauri::command]
 pub async fn browser_set_default(app: tauri::AppHandle) -> Result<DefaultBrowser, String> {
     run(move || {
+        let _operation = crate::cleaner::guarded_lease(&app, "ccbaga_browser")?;
         prepare_engine(&app)?;
         let data = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
             .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".local/share"))).ok_or("Cannot locate XDG data directory.")?;

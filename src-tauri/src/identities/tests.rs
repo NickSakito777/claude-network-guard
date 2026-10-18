@@ -26,6 +26,7 @@ fn database_metadata_and_recovery_are_transactional() {
         bytes: 22,
         policy: Policy::default(),
         empty: false,
+        account_key: None,
     };
     db.pending(&record, "empty").unwrap();
     assert_eq!(db.get("recovery").unwrap(), Some(record.id.clone()));
@@ -95,8 +96,10 @@ fn empty_identity_and_saved_identity_preserve_user_choices() {
     let with_skills = store
         .records()
         .into_iter()
-        .find(|r| r.name == "包含技能")
+        .find(|r| r.id == id)
         .unwrap();
+    assert_eq!(with_skills.name, "个人");
+    assert!(!with_skills.policy.skills);
     store
         .switch(&with_skills.id, "空身份", &choice, &reporter)
         .unwrap();
@@ -110,6 +113,8 @@ fn empty_identity_and_saved_identity_preserve_user_choices() {
         .is_err());
     assert!(home.join(".claude/.credentials.json").exists());
     assert!(home.join(".claude/skills/personal/SKILL.md").exists());
+    assert!(store.safe_after_error);
+    assert!(store.db.get("recovery").unwrap().is_none());
     drop(store);
     std::fs::remove_dir_all(folder).unwrap();
 }
@@ -358,5 +363,111 @@ fn missing_master_key_never_replaces_a_retired_registered_archive() {
     assert!(store::Store::open(&vault, &home).is_err());
     assert!(!vault.join("key.bin").exists());
     assert!(retired.exists());
+    std::fs::remove_dir_all(folder).unwrap();
+}
+
+
+#[test]
+fn damaged_archive_and_completed_rollback_allow_coordinated_browser_retry() {
+    let folder = canonicalize(std::env::temp_dir()).unwrap()
+        .join(format!("baga-coordinator-test-{}", new_id().unwrap()));
+    let home = folder.join("home");
+    let browser = folder.join("browser");
+    private::directory(&home.join(".claude")).unwrap();
+    private::directory(&browser).unwrap();
+    fixture_write(home.join(".claude/.credentials.json"),
+        br#"{"claudeAiOauth":{"accessToken":"quarantined fixture"}}"#).unwrap();
+    let mut store = store::Store::open(&folder.join("identity-vault"), &home).unwrap();
+    let reporter = Reporter::channel(None);
+    store.switch("empty", "fixture", &Policy::default(), &reporter).unwrap();
+    let saved = store.records().into_iter().find(|r| !r.empty).unwrap();
+    fixture_write(folder.join("identity-vault").join(&saved.archive), b"damaged archive").unwrap();
+    let live_credentials = home.join(".claude/.credentials.json");
+    fixture_write(&live_credentials, br#"{"claudeAiOauth":{"accessToken":"untouched fixture"}}"#).unwrap();
+    let pending = browser.join("identity-switch.pending");
+    fixture_write(&pending, b"1").unwrap();
+    crate::browser::test_run_identity_action(&browser, &home, true, || {
+        store.switch(&saved.id, "fixture", &Policy::default(), &reporter)
+            .map_err(|message| crate::browser::IdentityActionError {
+                message, safe_after_error: store.safe_after_error,
+            })
+    }).unwrap_err();
+    assert!(store.safe_after_error);
+    assert!(store.db.get("recovery").unwrap().is_none());
+    assert!(std::fs::read_to_string(&live_credentials).unwrap().contains("untouched fixture"));
+    assert!(pending.exists());
+    crate::browser::test_reconcile_identity(&browser, &home, |_| Ok(false)).unwrap();
+    assert!(!pending.exists());
+
+    fixture_write(
+        home.join(".claude.json"),
+        br#"{"oauthAccount":{"accountUuid":"rollback-account"}}"#,
+    )
+    .unwrap();
+    fixture_write(home.join(".claude/.credentials.json"),
+        br#"{"claudeAiOauth":{"accessToken":"rollback fixture"}}"#).unwrap();
+    fixture_write(&pending, b"1").unwrap();
+    store.fail_after_clear = true;
+    let error = crate::browser::test_run_identity_action(&browser, &home, true, || {
+        store.switch("empty", "rollback", &Policy::default(), &reporter)
+            .map_err(|message| crate::browser::IdentityActionError {
+                message, safe_after_error: store.safe_after_error,
+            })
+    }).unwrap_err();
+    assert!(error.contains("已恢复"));
+    assert!(store.db.get("recovery").unwrap().is_none());
+    assert!(std::fs::read_to_string(home.join(".claude/.credentials.json")).unwrap().contains("rollback fixture"));
+    crate::browser::test_reconcile_identity(&browser, &home, |_| Ok(false)).unwrap();
+    assert!(!pending.exists());
+    drop(store);
+    std::fs::remove_dir_all(folder).unwrap();
+}
+
+#[test]
+fn failed_recovery_keeps_the_browser_block_and_visible_warning() {
+    let folder = canonicalize(std::env::temp_dir()).unwrap()
+        .join(format!("baga-recovery-block-test-{}", new_id().unwrap()));
+    let home = folder.join("home");
+    let browser = folder.join("browser");
+    private::directory(&home.join(".claude")).unwrap();
+    private::directory(&browser).unwrap();
+    fixture_write(
+        home.join(".claude/.credentials.json"),
+        br#"{"claudeAiOauth":{"accessToken":"recovery fixture"}}"#,
+    )
+    .unwrap();
+    let mut store = store::Store::open(&folder.join("identity-vault"), &home).unwrap();
+    let reporter = Reporter::channel(None);
+    store.switch("empty", "fixture", &Policy::default(), &reporter).unwrap();
+    let saved = store.records().into_iter().find(|record| !record.empty).unwrap();
+    store.db.pending(&saved, "empty").unwrap();
+    fixture_write(
+        folder.join("identity-vault").join(&saved.archive),
+        b"damaged recovery archive",
+    )
+    .unwrap();
+
+    let pending = browser.join("identity-switch.pending");
+    fixture_write(&pending, b"1").unwrap();
+    crate::browser::test_run_identity_action(&browser, &home, true, || {
+        store.recover("fixture", &reporter).map_err(|message| {
+            crate::browser::IdentityActionError {
+                message,
+                safe_after_error: store.safe_after_error,
+            }
+        })
+    })
+    .unwrap_err();
+
+    assert!(!store.safe_after_error);
+    assert!(store.db.get("recovery").unwrap().is_some());
+    assert_eq!(std::fs::read(&pending).unwrap(), b"1");
+    assert!(crate::browser::test_reconcile_identity(&browser, &home, |_| Ok(false)).is_err());
+    assert!(crate::browser::test_run_identity_action(&browser, &home, true, || {
+        Err(crate::browser::IdentityActionError::safe("preflight retry".into()))
+    })
+    .is_err());
+    assert_eq!(std::fs::read(&pending).unwrap(), b"1");
+    drop(store);
     std::fs::remove_dir_all(folder).unwrap();
 }

@@ -118,6 +118,10 @@ fn handle(
     if method == "GET" && path == "context" {
         let mut current = context.clone();
         current.ui_language = crate::ui_language::ui_language_read(app.clone());
+        match super::identity_context(app) {
+            Ok(identity) => current.identity = identity,
+            Err(_) => { answer(stream, "503 Service Unavailable", "text/plain", b"Identity state unavailable"); return; }
+        }
         match super::config::machine() {
             Ok(machine) => current.machine = machine,
             Err(_) => {

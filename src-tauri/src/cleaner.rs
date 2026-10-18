@@ -1,6 +1,6 @@
 // [INPUT]: Claude 白名单、所选文件夹发现、配置变换、原子写入、官方原生 CLI 版本路径及 macOS/Linux/Windows 白名单路径边界。
-// [OUTPUT]: 全机/文件夹元数据扫描、旧组织发现、实时 Claude 进程检查与结束全部已识别进程；CLI 安装管理共用互斥锁与进程核验。
-// [POS]: 白名单与进程共用边界；身份操作由 identities 编排，历史直接清理只编译进测试。
+// [OUTPUT]: 全机/文件夹元数据扫描、旧组织发现、实时 Claude 进程检查与结束全部已识别进程；CLI、身份和 Guard 共用事务租约。
+// [POS]: 白名单与进程共用边界；身份/Guard 动作不递归取得租约，历史直接清理只编译进测试。
 // [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 use crate::native;
 use crate::progress::{Progress, Reporter};
@@ -20,7 +20,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex,
+        Arc, Condvar, Mutex,
     },
 };
 use tauri::{ipc::Channel, Manager};
@@ -140,19 +140,75 @@ pub struct Scan {
 #[derive(Default)]
 pub struct Cleaner {
     plan: Mutex<Option<Scan>>,
-    active: AtomicBool,
+    operation: Arc<OperationLock>,
 }
 impl Cleaner {
-    pub(crate) fn enter(&self) -> Result<(), String> {
-        if self.active.swap(true, Ordering::SeqCst) {
+    pub(crate) fn lease(&self) -> Result<OperationLease, String> {
+        let _gate = self.operation.wait.lock().unwrap();
+        if self.operation.closing.load(Ordering::SeqCst) {
+            return Err("Guard is exiting; wait for cleanup to finish.".into());
+        }
+        if self.operation.active.swap(true, Ordering::SeqCst) {
             Err("已有清理操作正在运行。".into())
         } else {
-            Ok(())
+            Ok(OperationLease(self.operation.clone()))
         }
     }
-    pub(crate) fn leave(&self) {
-        self.active.store(false, Ordering::SeqCst);
+
+    pub(crate) fn begin_shutdown(&self) {
+        let _gate = self.operation.wait.lock().unwrap();
+        self.operation.closing.store(true, Ordering::SeqCst);
     }
+
+    pub(crate) fn cancel_shutdown(&self) {
+        let _gate = self.operation.wait.lock().unwrap();
+        self.operation.closing.store(false, Ordering::SeqCst);
+    }
+
+    pub(crate) fn shutdown_ready(&self) -> bool {
+        self.operation.closing.load(Ordering::SeqCst) && !self.operation.active.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn lease_wait(&self) -> OperationLease {
+        let mut waiting = self.operation.wait.lock().unwrap();
+        while self.operation.active.swap(true, Ordering::SeqCst) {
+            waiting = self.operation.released.wait(waiting).unwrap();
+        }
+        OperationLease(self.operation.clone())
+    }
+}
+
+#[derive(Default)]
+struct OperationLock {
+    active: AtomicBool,
+    closing: AtomicBool,
+    wait: Mutex<()>,
+    released: Condvar,
+}
+
+pub(crate) struct OperationLease(Arc<OperationLock>);
+
+impl Drop for OperationLease {
+    fn drop(&mut self) {
+        let _waiting = self.0.wait.lock().unwrap();
+        self.0.active.store(false, Ordering::SeqCst);
+        self.0.released.notify_one();
+    }
+}
+
+pub(crate) fn guarded_lease(
+    app: &tauri::AppHandle,
+    target: &str,
+) -> Result<OperationLease, String> {
+    let lease = app.state::<Cleaner>().lease()?;
+    crate::guard::require_target(app, target)?;
+    Ok(lease)
+}
+
+pub(crate) fn fully_guarded_lease(app: &tauri::AppHandle) -> Result<OperationLease, String> {
+    let lease = app.state::<Cleaner>().lease()?;
+    crate::guard::require_environment(app)?;
+    Ok(lease)
 }
 fn home() -> Result<PathBuf, String> {
     #[cfg(windows)]
@@ -596,10 +652,9 @@ pub async fn cleaner_scan(
     folder: Option<String>,
     on_progress: Channel<Progress>,
 ) -> Result<Scan, String> {
-    let state = app.state::<Cleaner>();
-    state.enter()?;
     let worker = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = worker.state::<Cleaner>().lease()?;
         let reporter = Reporter::channel(Some(on_progress));
         reporter.log(
             "scan",
@@ -636,15 +691,13 @@ pub async fn cleaner_scan(
     .await
     .map_err(|_| "深度扫描被中断，请重试。".to_string())
     .and_then(|r| r);
-    state.active.store(false, Ordering::SeqCst);
     result
 }
 #[tauri::command]
 pub async fn cleaner_stop(app: tauri::AppHandle) -> Result<Scan, String> {
-    let state = app.state::<Cleaner>();
-    state.enter()?;
     let worker = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = worker.state::<Cleaner>().lease()?;
         let mut targets = std::collections::HashSet::new();
         // 主进程退出期间辅助进程可能重生；每轮重新识别，最多三轮，不扩大到其他 Node/MCP/终端。
         for _ in 0..3 {
@@ -680,7 +733,6 @@ pub async fn cleaner_stop(app: tauri::AppHandle) -> Result<Scan, String> {
     .await
     .map_err(|_| "结束进程被中断，请刷新。".to_string())
     .and_then(|r| r);
-    state.active.store(false, Ordering::SeqCst);
     result
 }
 fn selected(plan: &Scan, ids: &[String]) -> Result<Vec<Item>, String> {

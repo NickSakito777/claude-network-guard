@@ -1,5 +1,5 @@
-// [INPUT]: SQLite 目录、用户策略、白名单源、tar/gzip、认证加密与平台凭据桥。
-// [OUTPUT]: 已验证身份归档、先暂存后切换、持久恢复记录、原位配置合并及明确的直接删除。
+// [INPUT]: SQLite 目录与 HMAC 账号索引、用户策略、白名单源、tar/gzip、认证加密与平台凭据桥。
+// [OUTPUT]: 验证后的不可变归档代次、先暂存后切换、持久恢复记录、原位配置合并及明确的直接删除。
 // [POS]: 身份的文件事务；SQLite 与文件系统由恢复日志协调，不能假装是同一原子事务。
 // [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 use super::{
@@ -21,19 +21,21 @@ use std::{
 };
 use zeroize::Zeroizing;
 #[derive(Serialize, Deserialize)]
-struct Manifest {
+pub(super) struct Manifest {
     version: u32,
     id: String,
     home: PathBuf,
     platform: String,
     policy: Policy,
-    sources: Vec<Source>,
+    pub(super) sources: Vec<Source>,
     credentials: Vec<serde_json::Value>,
     fingerprints: Vec<Vec<u8>>,
+    #[serde(default)]
+    pub(super) account_key: Option<String>,
 }
 pub(super) struct Stage {
-    path: PathBuf,
-    manifest: Manifest,
+    pub(super) path: PathBuf,
+    pub(super) manifest: Manifest,
 }
 impl Drop for Stage {
     fn drop(&mut self) {
@@ -41,10 +43,12 @@ impl Drop for Stage {
     }
 }
 pub struct Store {
-    vault: PathBuf,
-    home: PathBuf,
-    key: Zeroizing<Vec<u8>>,
+    pub(super) vault: PathBuf,
+    pub(super) home: PathBuf,
+    pub(super) key: Zeroizing<Vec<u8>>,
     pub(super) db: Database,
+    // True only while live data is untouched or a rollback/commit finished.
+    pub(super) safe_after_error: bool,
     #[cfg(test)]
     pub(super) fail_after_clear: bool,
 }
@@ -129,7 +133,7 @@ impl Store {
             {
                 private::safe(&path)?;
                 if let Some(record) = records.iter().find(|r| r.id == id) {
-                    if record.archive != format!("{id}.baga") {
+                    if !super::catalog::archive_name(&record.archive) {
                         return Err("身份归档编号无效。".into());
                     }
                     let original = vault.join(&record.archive);
@@ -141,14 +145,20 @@ impl Store {
                 }
             }
         }
-        Ok(Self {
+        let store = Self {
             vault: vault.into(),
             home: home.into(),
             key,
             db,
+            safe_after_error: true,
             #[cfg(test)]
             fail_after_clear: false,
-        })
+        };
+        if store.db.get("recovery")?.is_none() {
+            store.index_legacy()?;
+            store.collect_generations()?;
+        }
+        Ok(store)
     }
     fn stopped(&self) -> Result<(), String> {
         #[cfg(test)]
@@ -195,8 +205,8 @@ impl Store {
             .find(|r| r.id == id)
             .ok_or("身份不存在。".into())
     }
-    fn load(&self, record: &Record) -> Result<Stage, String> {
-        if !super::valid_id(&record.id) || record.archive != format!("{}.baga", record.id) {
+    pub(super) fn load(&self, record: &Record) -> Result<Stage, String> {
+        if !super::valid_id(&record.id) || !super::catalog::archive_name(&record.archive) {
             return Err("身份归档编号无效。".into());
         }
         let archive = self.vault.join(&record.archive);
@@ -311,6 +321,23 @@ impl Store {
         policy: &Policy,
         reporter: &Reporter,
     ) -> Result<(Record, Stage), String> {
+        self.save_inner(name, policy, reporter, true)
+    }
+    pub(super) fn save_checkpoint(
+        &self,
+        name: &str,
+        policy: &Policy,
+        reporter: &Reporter,
+    ) -> Result<(Record, Stage), String> {
+        self.save_inner(name, policy, reporter, false)
+    }
+    fn save_inner(
+        &self,
+        name: &str,
+        policy: &Policy,
+        reporter: &Reporter,
+        reuse: bool,
+    ) -> Result<(Record, Stage), String> {
         self.stopped()?;
         let sources = identity::sources(&self.home, policy)?;
         let fingerprints = sources
@@ -319,7 +346,27 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()?;
         let credentials = self.snapshot_keys()?;
         super::credentials::clear(&credentials, policy)?;
-        let id = super::new_id()?;
+        let account_key = if reuse {
+            super::catalog::live_key(&self.home, &self.key)?
+        } else {
+            None
+        };
+        let previous = account_key
+            .as_deref()
+            .map(|key| self.db.by_account(key))
+            .transpose()?
+            .flatten();
+        let draft = if reuse {
+            self.db.browser_draft()?
+        } else {
+            None
+        };
+        let id = previous
+            .as_ref()
+            .map(|record| record.id.clone())
+            .or(draft)
+            .unwrap_or(super::new_id()?);
+        let generation = super::new_id()?;
         let manifest = Manifest {
             version: 1,
             id: id.clone(),
@@ -329,9 +376,10 @@ impl Store {
             sources,
             credentials,
             fingerprints,
+            account_key: account_key.clone(),
         };
-        let pending = self.vault.join(format!(".pending-{id}"));
-        let destination = self.vault.join(format!("{id}.baga"));
+        let pending = self.vault.join(format!(".pending-{generation}"));
+        let destination = self.vault.join(format!("{generation}.baga"));
         let result = (|| {
             let output =
                 codec::Seal::new(private::create(&pending)?, &self.key).map_err(problem)?;
@@ -391,7 +439,10 @@ impl Store {
             private::sync_parent(&destination);
             let record = Record {
                 id,
-                name: name.into(),
+                name: previous
+                    .as_ref()
+                    .map(|record| record.name.clone())
+                    .unwrap_or_else(|| name.into()),
                 archive: destination
                     .file_name()
                     .unwrap()
@@ -404,12 +455,14 @@ impl Store {
                 bytes: fs::metadata(&destination).map_err(problem)?.len(),
                 policy: policy.clone(),
                 empty: manifest.sources.is_empty() && manifest.credentials.is_empty(),
+                account_key: Some(account_key.unwrap_or_default()),
             };
             let stage = self.load(&record)?;
             Ok((record, stage))
         })();
         if result.is_err() {
             let _ = fs::remove_file(pending);
+            let _ = fs::remove_file(destination);
         }
         result
     }
@@ -537,6 +590,7 @@ impl Store {
         self.keys(&stage.manifest.credentials, true, policy)
     }
     pub fn delete(&mut self, id: &str, policy: &Policy, reporter: &Reporter) -> Result<(), String> {
+        self.safe_after_error = true;
         if self.db.get("recovery")?.is_some() {
             return Err("请先恢复未完成的身份切换。".into());
         }
@@ -563,13 +617,15 @@ impl Store {
                 None,
             );
             let selected: Vec<_> = sources.into_iter().enumerate().collect();
+            self.safe_after_error = false;
             self.clear(&selected)
                 .and_then(|_| self.keys(&credentials, false, policy))
                 .map_err(|_| "直接删除未完成；部分数据可能已删除，请刷新检查。".to_string())?;
             self.db.complete("empty")?;
+            self.safe_after_error = true;
         } else {
             let record = self.record(id)?;
-            if record.archive != format!("{id}.baga") {
+            if !super::catalog::archive_name(&record.archive) {
                 return Err("身份归档编号无效。".into());
             }
             let path = self.vault.join(&record.archive);
@@ -599,8 +655,16 @@ impl Store {
         policy: &Policy,
         reporter: &Reporter,
     ) -> Result<(), String> {
+        self.safe_after_error = true;
         if self.db.get("recovery")?.is_some() {
             return Err("请先恢复未完成的身份切换。".into());
+        }
+        let live_key = super::catalog::live_key(&self.home, &self.key)?;
+        if target != "empty" && live_key.is_some() && self.record(target)?.account_key == live_key {
+            self.db.complete(target)?;
+            self.db.compact()?;
+            let _ = self.collect_generations();
+            return Ok(());
         }
         let incoming = if target == "empty" {
             None
@@ -631,6 +695,7 @@ impl Store {
                 }
             }
             mutated = true;
+            self.safe_after_error = false;
             self.clear(&current)?;
             #[cfg(test)]
             if self.fail_after_clear {
@@ -641,6 +706,7 @@ impl Store {
                 self.restore(stage, &next, policy)?;
             }
             self.db.complete(target)?;
+            self.safe_after_error = true;
             Ok(())
         })();
         if let Err(error) = result {
@@ -658,11 +724,14 @@ impl Store {
                     self.db.complete(&record.id)
                 })();
                 if rollback.is_ok() {
+                    self.safe_after_error = true;
                     return Err(format!("{error} 已恢复切换前的身份。"));
                 }
             }
             return Err(format!("{error} 原身份已暂存，请使用恢复操作。"));
         }
+        self.db.compact()?;
+        let _ = self.collect_generations();
         reporter.log(
             "verify",
             "ok",
@@ -673,6 +742,7 @@ impl Store {
         Ok(())
     }
     pub fn recover(&mut self, name: &str, reporter: &Reporter) -> Result<(), String> {
+        self.safe_after_error = false;
         let id = self.db.get("recovery")?.ok_or("没有需要恢复的身份事务。")?;
         let record = self.record(&id)?;
         let outgoing = self.load(&record)?;
@@ -685,7 +755,8 @@ impl Store {
         self.stopped()?;
         reporter.log("switch", "running", "正在恢复未完成的身份切换。", 0, None);
         // 恢复前再保存现状，避免崩溃后用户新产生的数据被恢复操作覆盖。
-        let (checkpoint, current_stage) = self.save(name, &outgoing.manifest.policy, reporter)?;
+        let (checkpoint, current_stage) =
+            self.save_checkpoint(name, &outgoing.manifest.policy, reporter)?;
         self.db.remember(&checkpoint)?;
         self.clear(&Self::selected(&current_stage, &outgoing.manifest.policy))?;
         let current = Self::selected(&outgoing, &outgoing.manifest.policy);
@@ -697,6 +768,9 @@ impl Store {
         self.keys(&live, false, &outgoing.manifest.policy)?;
         self.restore(&outgoing, &current, &outgoing.manifest.policy)?;
         self.db.complete(&record.id)?;
+        self.safe_after_error = true;
+        self.db.compact()?;
+        let _ = self.collect_generations();
         reporter.log("verify", "ok", "原身份已恢复。", 1, Some(1));
         Ok(())
     }

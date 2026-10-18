@@ -1,6 +1,6 @@
-// [INPUT]: 平台内嵌 claude-cli.sh/ps1、当前用户平台环境、清理事务互斥锁及真实进度通道。
-// [OUTPUT]: Claude Code CLI 只读安装状态、一键卸载/重装与版本核验，配置和个人资产不在删除范围。
-// [POS]: 本机程序安装边界；白名单动作由原生层限定，进程未退出时拒绝修改，输出不暴露包管理器原始诊断。
+// [INPUT]: 平台内嵌 claude-cli.sh/ps1、当前用户平台环境、Cleaner 租约、Claude Code Guard 状态与真实进度通道。
+// [OUTPUT]: Claude Code CLI 只读安装状态、核验锁定保护后的卸载/重装与版本核验，配置和个人资产不在删除范围。
+// [POS]: 本机程序安装边界；受保护变更要求 Claude Code 锁定且清理已确认，进程未退出时拒绝修改，输出不暴露包管理器原始诊断。
 // [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 use crate::{
     cleaner::Cleaner,
@@ -177,9 +177,10 @@ pub async fn claude_cli_manage(
     if !matches!(action.as_str(), "uninstall" | "reinstall") {
         return Err("无效的 Claude Code 安装操作。".into());
     }
-    let state = app.state::<Cleaner>();
-    state.enter()?;
+    let worker = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = worker.state::<Cleaner>().lease()?;
+        crate::guard::require_target(&worker, "claude_code")?;
         let log = Arc::new(Reporter::channel(Some(on_progress)));
         let result = (|| {
             if crate::cleaner::cli_running()? {
@@ -195,7 +196,6 @@ pub async fn claude_cli_manage(
     .await
     .map_err(|_| "Claude Code 安装任务被中断。".to_string())
     .and_then(|result| result);
-    state.leave();
     result
 }
 

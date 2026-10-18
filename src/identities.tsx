@@ -1,7 +1,7 @@
 /**
- * [INPUT]: 原生身份命令、保留策略、Motion 弹簧/浏览器媒体订阅、共享确认窗/进度与 CLI 维护。
- * [OUTPUT]: 空/当前/暂存身份的竖式立体工牌，顶部绿光标记当前状态；弹簧横滚、悬停视差（操作区冻结动态）、账号显示与永久删除 Alert 警告（默认取消、需勾选确认）。
- * [POS]: 身份管理 GUI；只呈现脱敏元数据，身份正文留在原生保险库。
+ * [INPUT]: 原生身份与浏览器联动命令、保留策略、Motion 弹簧/浏览器媒体订阅、共享确认窗/进度与 CLI 维护。
+ * [OUTPUT]: 空/当前/暂存身份工牌、浏览器联动确认与资料删除选择、切换重开告警、脱敏账号展示和永久删除 Alert。
+ * [POS]: 身份管理 GUI；只呈现脱敏元数据，身份正文留在原生保险库；浏览器资料不随归档压缩或合并。
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
 import {useEffect, useRef, useState, useSyncExternalStore, type ReactNode} from 'react';
@@ -22,16 +22,18 @@ export function IdentityPanel({onBusy, initialEmpty=false}: {onBusy?: (busy:bool
  const [policy,setPolicy]=useState({...defaultPolicy});
  const [loading,setLoading]=useState(true), [busy,setBusy]=useState(false), [cliBusy,setCliBusy]=useState(false);
  const [error,setError]=useState('');
+ const [browserReview,setBrowserReview]=useState<boolean|null>(null),[useExisting,setUseExisting]=useState(false);
  const [review,setReview]=useState<Target|null>(initialEmpty?'empty':null);
  const [name,setName]=useState(t('当前身份'));
  const [rename,setRename]=useState<Identity|null>(null), [renameValue,setRenameValue]=useState('');
+ const [deleteBrowser,setDeleteBrowser]=useState(false);
  const [deletion,setDeletion]=useState<Identity|'current'|null>(null), [accepted,setAccepted]=useState(false);
  const activity=useCleanupActivity();
  const rail=useRef<HTMLDivElement>(null);
  const reduceMotion=useIdentityReducedMotion();
  const scrollSpring=useSpring(0,{stiffness:170,damping:25,mass:.8});
  const scrollTarget=useRef(0);
- const locked=busy||cliBusy||!!review||!!rename||!!deletion;
+ const locked=busy||cliBusy||!!review||!!rename||!!deletion||browserReview!==null;
  const active=state?.records.find(row=>row.id===state.active);
  const current=state?.current;
  const currentName=current?.display_name||current?.email?.split('@')[0]||active?.name||t('当前身份');
@@ -70,6 +72,20 @@ export function IdentityPanel({onBusy, initialEmpty=false}: {onBusy?: (busy:bool
  async function refreshAfterError() {
   try {setState(await invoke<IdentityState>('identities_read'));} catch {/* 保留操作错误，不掩盖恢复失败。 */}
  }
+ async function configureBrowser() {
+  if(browserReview===null||busy)return;
+  const enabled=browserReview;setBusy(true);setError('');
+  try {setState(await invoke<IdentityState>('identities_browser',{enabled,useExisting}));setBrowserReview(null);}
+  catch(e){setError(String(e));await refreshAfterError();}finally{setBusy(false);}
+ }
+ async function retryBrowser() {
+  if(busy)return;const retryUnlink=state?.browser.enabled===false;setBusy(true);setError('');
+  try {
+   if(retryUnlink) setState(await invoke<IdentityState>('identities_browser',{enabled:false,useExisting:false}));
+   else {await invoke('browser_launch',{onProgress:activity.start('browser')});activity.finish(true,'浏览器资料已与身份同步。');await read();}
+  }
+  catch(e){setError(String(e));if(!retryUnlink)activity.finish(false,String(e));await refreshAfterError();}finally{setBusy(false);}
+ }
  function choose(target:Target) {
   setName(target==='recovery'?t('恢复前状态'):currentName.slice(0,64));
   if(target==='recovery') {const previous=state?.records.find(row=>row.id===state.recovery);if(previous)setPolicy({...previous.policy});}
@@ -90,14 +106,14 @@ export function IdentityPanel({onBusy, initialEmpty=false}: {onBusy?: (busy:bool
   } catch(e) {setError(String(e));activity.finish(false,String(e));await refreshAfterError();}
   finally {setBusy(false);}
  }
- function confirmDelete(target:Identity|'current') {setDeletion(target);setAccepted(false);setError('');}
+ function confirmDelete(target:Identity|'current') {setDeletion(target);setAccepted(false);setDeleteBrowser(false);setError('');}
  async function remove() {
   if(!deletion||!accepted||busy)return;
   const target=deletion;setDeletion(null);setBusy(true);setError('');
   const onProgress=activity.start('identity');
   try {
    if(target==='current')await stop();
-   setState(await invoke<IdentityState>('identities_delete',{id:target==='current'?'current':target.id,policy,onProgress}));
+   setState(await invoke<IdentityState>('identities_delete',{id:target==='current'?'current':target.id,policy,deleteBrowser,onProgress}));
    activity.finish(true,'所选本地身份已直接删除。');
   } catch(e) {setError(String(e));activity.finish(false,String(e));await refreshAfterError();}
   finally {setBusy(false);}
@@ -113,7 +129,7 @@ export function IdentityPanel({onBusy, initialEmpty=false}: {onBusy?: (busy:bool
   <header className="cleanup-title"><h1>{t('Claude 身份管理')}</h1><Button variant="secondary" size="small" disabled={locked||loading} leftIcon={<Refresh aria-hidden size={16} className={loading?'spin':''}/>} onClick={()=>void read()}>{t('刷新')}</Button></header>
   {error&&<p role="alert" className="cleanup-feedback error">{t(error)}</p>}
   {state?.recovery&&<div className="identity-recovery" role="alert"><strong>{t('有一次身份切换尚未完成')}</strong><Button size="small" variant="ink" disabled={locked||loading} onClick={()=>choose('recovery')}>{t('恢复原身份')}</Button></div>}
-    <section className="identity-library"><div className="identity-section-head"><h2>{t('身份')}</h2><span className="identity-count">{state?.records.length||0} {t('暂存身份')}</span></div>
+    <section className="identity-library"><div className="identity-section-head"><h2>{t('身份')}</h2><div className="identity-library-controls"><span className="identity-count">{state?.records.length||0} {t('暂存身份')}</span><Checkbox label={t('联动浏览器')} checked={state?.browser.enabled??false} disabled={blocked} onCheckedChange={value=>{setUseExisting(false);setBrowserReview(value===true);setError('');}}/></div></div>
    <div className="identity-card-rail" ref={rail} tabIndex={0} role="region" aria-label={t('身份')}>
     <IdentityCard className={`identity-card empty${current?.present===false?' selected':''}`} label={current?.present===false?`${t('空身份')} · ${t('当前身份')}`:t('空身份')}>
      <div className="identity-card-head"><div className="identity-avatar" aria-hidden="true">∅</div></div>
@@ -124,24 +140,28 @@ export function IdentityPanel({onBusy, initialEmpty=false}: {onBusy?: (busy:bool
      <div className="identity-card-head"><div className="identity-avatar" aria-hidden="true">{current?.display_name||current?.email?Array.from(currentName)[0]?.toUpperCase():<ShieldCheck size={20}/>}</div><span className="identity-live-badge">{loading?t('检查中'):state?.running?t('运行中'):t('进程已停止')}</span></div>
      <h3>{currentName}</h3>
      <div className="identity-account">{current?.email?<span className="identity-email">{current.email}</span>:<span className="identity-account-unknown">{t(current?.unavailable?'账号信息暂不可读':'账号信息未识别')}</span>}{current?.organization&&<span className="identity-organization">{current.organization}</span>}</div>
-     {(current?.email||current?.display_name)&&<span className="identity-account-source">Claude Code</span>}
+     {(current?.email||current?.display_name)&&<span className="identity-account-source">Claude Code</span>}{state?.browser.enabled&&<span className="identity-browser-badge">{t('独立浏览器')}</span>}
      <div className="identity-card-footer"><Button variant="secondary" size="small" disabled={blocked} onClick={()=>choose('empty')}>{t('暂存')}</Button><Button variant="ghost" size="small" disabled={blocked} onClick={()=>confirmDelete('current')}>{t('直接删除')}</Button></div>
     </IdentityCard>}
     {state?.records.map(row=><IdentityCard className={`identity-card${state.active===row.id?' selected':''}`} key={row.id}>
      <div className="identity-card-head"><div className="identity-avatar" aria-hidden="true">{Array.from(row.name)[0]?.toUpperCase()}</div>{row.id===state.active&&<span className="identity-card-badge">{t('上次使用')}</span>}<span className="identity-size">{formatBytes(row.bytes)}</span></div>
-     <h3>{row.name}</h3><time>{new Date(row.saved_at).toLocaleString(locale==='zh'?'zh-CN':'en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}</time>
+     <h3>{row.name}</h3>{state?.browser.bound_ids.includes(row.id)&&<span className="identity-browser-badge">{t('独立浏览器')}</span>}<time>{new Date(row.saved_at).toLocaleString(locale==='zh'?'zh-CN':'en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}</time>
      <div className="identity-card-footer"><Button variant="secondary" size="small" disabled={blocked} onClick={()=>choose(row)}>{t('切换')}</Button><Button variant="ghost" size="small" disabled={blocked} onClick={()=>{setRename(row);setRenameValue(row.name);}}>{t('重命名')}</Button><Button variant="ghost" size="small" disabled={blocked} onClick={()=>confirmDelete(row)}>{t('删除')}</Button></div>
     </IdentityCard>)}
    </div>
   </section>
   <details className="identity-policy"><summary><strong>{t('保留在工作区')}</strong><span>{kept.length} / {policyRows.length}</span></summary>{options}</details>
+  {state?.browser_warning&&<div className="identity-recovery" role="alert"><span>{t(state.browser_warning)}</span><Button size="small" variant="secondary" disabled={blocked} onClick={()=>void retryBrowser()}>{t(state.browser.enabled?'打开浏览器':'重试解除浏览器联动')}</Button></div>}
   <CleanupActivity activity={activity.state}/>
   <ClaudeCliPanel blocked={locked||loading||!!state?.recovery} onBusy={setCliBusy}/>
   <AppDialog open={!!review} onOpenChange={open=>{if(!open&&!busy)setReview(null);}} title={review==='recovery'?t('恢复原身份'):review==='empty'?t('切换到空身份'):t('切换身份')} description={t('先压缩暂存当前 Claude Code 与 Desktop 状态，再切换。将结束已识别的 Claude 进程，未保存任务会中断。')} footer={<><Button variant="secondary" onClick={()=>setReview(null)}>{t('取消')}</Button><Button variant="ink" disabled={busy||loading||!state||!name.trim()} onClick={()=>void change()}>{review==='recovery'?t('确认恢复'):t('确认暂存并切换')}</Button></>}>
-   <div className="identity-confirm"><label htmlFor="identity-current-name">{t('当前身份保存为')}</label><Input id="identity-current-name" maxLength={64} value={name} onChange={e=>setName(e.target.value)}/>{typeof review==='object'&&review&&<div className="identity-confirm-target"><span>{t('目标身份')}</span><strong>{review.name}</strong></div>}<div className="identity-confirm-keep"><span>{t('留在工作区')}</span><strong>{kept.join(' · ')||t('无')}</strong></div><p>{t('只管理本地状态；失效的登录可能需要重新认证。')}</p></div>
+   <div className="identity-confirm"><label htmlFor="identity-current-name">{t('当前身份保存为')}</label><Input id="identity-current-name" maxLength={64} value={name} onChange={e=>setName(e.target.value)}/>{typeof review==='object'&&review&&<div className="identity-confirm-target"><span>{t('目标身份')}</span><strong>{review.name}</strong></div>}<div className="identity-confirm-keep"><span>{t('留在工作区')}</span><strong>{kept.join(' · ')||t('无')}</strong></div>{state?.browser.enabled&&<p>{t('将关闭并重开关联浏览器，请先保存网页任务。')}</p>}<p>{t('只管理本地状态；失效的登录可能需要重新认证。')}</p></div>
   </AppDialog>
   <AppDialog alert className="identity-delete-alert" open={!!deletion} onOpenChange={open=>{if(!open&&!busy)setDeletion(null);}} title={deletion==='current'?t('直接删除当前身份'):t('删除暂存身份')} description={deletion==='current'?t('将结束 Claude 进程并删除所选本地数据。不会新增备份，已有暂存身份不受影响。'):t('永久删除这份暂存文件。当前工作区不受影响。')} footer={<><Button variant="secondary" data-dialog-cancel onClick={()=>setDeletion(null)}>{t('取消')}</Button><Button className="identity-delete-button" variant="ink" disabled={busy||!accepted} onClick={()=>void remove()}>{t('确认直接删除')}</Button></>}>
-   <div className="identity-confirm"><div className="identity-delete-warning"><span aria-hidden="true">!</span><strong>{t('警告：此操作不可撤销，不会创建新备份。')}</strong></div>{deletion==='current'?<><div className="identity-confirm-keep"><span>{t('删除范围')}</span><strong>{[t('登录与身份数据'),...removed].join(' · ')}</strong></div><div className="identity-confirm-keep"><span>{t('留在工作区')}</span><strong>{kept.join(' · ')||t('无')}</strong></div></>:<strong>{deletion?.name}</strong>}<Checkbox checked={accepted} onCheckedChange={setAccepted} label={t('我知道此操作无法撤销')}/></div>
+   <div className="identity-confirm"><div className="identity-delete-warning"><span aria-hidden="true">!</span><strong>{t('警告：此操作不可撤销，不会创建新备份。')}</strong></div>{deletion==='current'?<><div className="identity-confirm-keep"><span>{t('删除范围')}</span><strong>{[t('登录与身份数据'),...removed].join(' · ')}</strong></div><div className="identity-confirm-keep"><span>{t('留在工作区')}</span><strong>{kept.join(' · ')||t('无')}</strong></div></>:<strong>{deletion?.name}</strong>}{typeof deletion==='object'&&deletion&&state?.browser.bound_ids.includes(deletion.id)&&<Checkbox label={t('同时永久删除关联浏览器资料')} checked={deleteBrowser} onCheckedChange={value=>setDeleteBrowser(value===true)}/>}<Checkbox checked={accepted} onCheckedChange={setAccepted} label={t('我知道此操作无法撤销')}/></div>
+  </AppDialog>
+  <AppDialog open={browserReview!==null} onOpenChange={open=>{if(!open&&!busy)setBrowserReview(null);}} title={t(browserReview?'联动浏览器':'关闭浏览器联动')} description={t('将正常关闭关联浏览器；完成后请从保护中心重新启动。')} footer={<><Button variant="secondary" disabled={busy} onClick={()=>setBrowserReview(null)}>{t('取消')}</Button><Button variant="ink" disabled={busy} loading={busy} onClick={()=>void configureBrowser()}>{t('确认')}</Button></>}>
+   <div className="identity-confirm"><p>{t(browserReview?'每个身份使用独立网页资料和稳定指纹，切换时自动恢复。首次仍需登录网站。':'恢复使用原有通用浏览器资料。各身份的独立资料会保留。')}</p>{browserReview&&<Checkbox label={t('将现有浏览器资料关联给当前身份')} checked={useExisting} disabled={busy} onCheckedChange={value=>setUseExisting(value===true)}/>}<p>{t('默认创建新资料，现有资料不会删除。资料隔离不会改变出口 IP。')}</p>{error&&<p role="alert">{t(error)}</p>}</div>
   </AppDialog>
   <AppDialog open={!!rename} onOpenChange={open=>{if(!open&&!busy)setRename(null);}} title={t('重命名身份')} footer={<><Button variant="secondary" onClick={()=>setRename(null)}>{t('取消')}</Button><Button variant="ink" disabled={busy||!renameValue.trim()} onClick={()=>void saveName()}>{t('保存')}</Button></>}><Input aria-label={t('身份名称')} maxLength={64} value={renameValue} onChange={e=>setRenameValue(e.target.value)}/>{error&&<p role="alert">{t(error)}</p>}</AppDialog>
  </section>;
