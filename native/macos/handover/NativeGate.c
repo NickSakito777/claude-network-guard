@@ -15,6 +15,13 @@
 #include <stdatomic.h>
 #endif
 
+_Static_assert(sizeof(ng_readback) == 24, "ng_readback ABI size changed");
+_Static_assert(offsetof(ng_readback, bound) == 0, "ng_readback.bound ABI offset changed");
+_Static_assert(offsetof(ng_readback, open) == 4, "ng_readback.open ABI offset changed");
+_Static_assert(offsetof(ng_readback, generation) == 8, "ng_readback.generation ABI offset changed");
+_Static_assert(offsetof(ng_readback, active_pairs) == 16, "ng_readback.active_pairs ABI offset changed");
+_Static_assert(offsetof(ng_readback, pending) == 20, "ng_readback.pending ABI offset changed");
+
 #define NG_MAX_PAIRS 64
 #define NG_LEASE_MAX_NS 3000000000ULL
 
@@ -560,6 +567,20 @@ size_t ng_active_pairs(ng_gate *g) {
     for (size_t i = 0; i < NG_MAX_PAIRS; ++i) if (g->pairs[i].running) ++n;
     if (g->pending_client >= 0) ++n;
     pthread_mutex_unlock(&g->mu); return n;
+}
+int ng_get_readback(ng_gate *g, ng_readback *out) {
+    if (!g || !out) return EINVAL;
+    pthread_mutex_lock(&g->mu);
+    uint32_t active = 0;
+    for (size_t i = 0; i < NG_MAX_PAIRS; ++i)
+        if (g->pairs[i].running) ++active;
+    out->bound = g->listener >= 0 ? 1U : 0U;
+    out->open = live_locked(g) ? 1U : 0U;
+    out->generation = g->generation;
+    out->active_pairs = active;
+    out->pending = (g->pending_client >= 0 || g->pending_upstream >= 0) ? 1U : 0U;
+    pthread_mutex_unlock(&g->mu);
+    return 0;
 }
 void ng_destroy(ng_gate *g) {
     if (!g) return;

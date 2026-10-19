@@ -1,10 +1,18 @@
 #ifndef NATIVE_GATE_H
 #define NATIVE_GATE_H
+#include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
 
 typedef struct ng_gate ng_gate;
 typedef struct { pid_t pid; uint32_t uid; uint64_t birth_sec; uint32_t birth_usec; } ng_owner;
+typedef struct {
+    uint32_t bound;
+    uint32_t open;
+    uint64_t generation;
+    uint32_t active_pairs;
+    uint32_t pending;
+} ng_readback;
 
 // All functions are thread safe. Test adoption takes ownership of both fds.
 ng_gate *ng_create(void);
@@ -33,4 +41,6 @@ int ng_is_open(ng_gate *gate);
 int ng_is_bound(ng_gate *gate); // actual listener FD owned by this instance
 // Includes active relay pairs and any accepted client awaiting upstream/adopt.
 size_t ng_active_pairs(ng_gate *gate);
+// One mutex-protected snapshot. pending is 0/1; active_pairs counts relay slots.
+int ng_get_readback(ng_gate *gate, ng_readback *out);
 #endif
