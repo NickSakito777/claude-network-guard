@@ -43,12 +43,28 @@ private func processExit(_ process: ManagedSessionProcessIdentity) -> ManagedSes
     ManagedSessionProcessExitObservation(expected: process, observed: process)
 }
 
-private func completeGateFDAudit(_ binding: ManagedSessionBinding,
-                                 missingKinds: Set<ManagedSessionGateDescriptorKind> = [],
-                                 missingExclusions: Set<ManagedSessionGateFDEscapePath> = []) -> ManagedSessionGateFDInheritanceAudit {
-    ManagedSessionGateFDInheritanceAudit(binding: binding, owner: binding.host,
+private func currentProductionGateFDAudit(_ binding: ManagedSessionBinding,
+                                          missingKinds: Set<ManagedSessionGateDescriptorKind> = [],
+                                          missingExclusions: Set<ManagedSessionGateFDEscapePath> = []) -> ManagedSessionGateFDInheritanceAudit {
+    let unresolved = ManagedSessionSourceSnapshot.currentKnownUnresolvedEscapePaths
+    return ManagedSessionGateFDInheritanceAudit(binding: binding, owner: binding.host,
         auditedDescriptorKinds: Set(ManagedSessionGateDescriptorKind.allCases).subtracting(missingKinds),
-        excludedEscapePaths: Set(ManagedSessionGateFDEscapePath.allCases).subtracting(missingExclusions))
+        excludedEscapePaths: Set(ManagedSessionGateFDEscapePath.allCases)
+            .subtracting(unresolved).subtracting(missingExclusions),
+        unresolvedEscapePaths: unresolved,
+        sourceSnapshotSHA256: ManagedSessionSourceSnapshot.sha256)
+}
+
+// Explicitly hypothetical: this lets fixtures exercise the model's success
+// transition without claiming the current production source has this property.
+private func hypotheticalAllGateFDsContained(
+    _ binding: ManagedSessionBinding,
+    missingKinds: Set<ManagedSessionGateDescriptorKind> = [],
+    missingExclusions: Set<ManagedSessionGateFDEscapePath> = []
+) -> ManagedSessionGateFDInheritanceFixtureAssumption {
+    return ManagedSessionGateFDInheritanceFixtureAssumption(binding: binding, owner: binding.host,
+        assumedDescriptorKindsContained: Set(ManagedSessionGateDescriptorKind.allCases).subtracting(missingKinds),
+        assumedEscapePathsAbsent: Set(ManagedSessionGateFDEscapePath.allCases).subtracting(missingExclusions))
 }
 
 private func inventory(_ binding: ManagedSessionBinding,
@@ -81,9 +97,11 @@ private func launchPendingState() throws -> ManagedSessionProtocolState {
     return state
 }
 
-private func spawnReturn(_ request: UUID = requestID, pid: Int32 = 402) -> ManagedSessionSpawnReturn {
+private func spawnReturn(_ request: UUID = requestID, pid: Int32 = 402,
+                         startedAt: UInt64 = 250, returnedAt: UInt64 = 260) -> ManagedSessionSpawnReturn {
     let child = identity(pid, targetPath, targetRequirement)
-    return ManagedSessionSpawnReturn(requestID: request, returnedPID: pid, process: child)
+    return ManagedSessionSpawnReturn(requestID: request, spawnStartedAtNanos: startedAt,
+        returnedAtNanos: returnedAt, returnedPID: pid, process: child)
 }
 
 private func runningState() throws -> ManagedSessionProtocolState {
@@ -154,11 +172,26 @@ private struct ManagedSessionProtocolTests {
         }
         c.require(state.phase == .recovery, "Gate must not open before supervisor READY")
 
-        c.fails(.invalidBinding) {
-            _ = try ManagedSessionProtocolState(binding: binding, supervisor: supervisorIdentity(),
-                targetID: "claude", targetExecutable: targetPath,
-                targetCodeRequirement: targetRequirement,
-                cleanupScopePaths: ["/Applications/Other.app/Contents/"])
+        for broadOrWrongScope in ["/", "/Applications/", "/Applications/Claude.app/",
+                                  "/Applications/Other.app/Contents/",
+                                  "/Applications/Claude.app/Contents/Resources/"] {
+            c.fails(.invalidBinding) {
+                _ = try ManagedSessionProtocolState(binding: binding, supervisor: supervisorIdentity(),
+                    targetID: "claude", targetExecutable: targetPath,
+                    targetCodeRequirement: targetRequirement,
+                    cleanupScopePaths: [broadOrWrongScope])
+            }
+        }
+        for mixedScopes: Set<String> in [
+            [cleanupScope, "/"],
+            [cleanupScope, "/Applications/Other.app/Contents/"],
+            [cleanupScope, "/Applications/Claude.app/../../Other.app/Contents/"],
+        ] {
+            c.fails(.invalidBinding) {
+                _ = try ManagedSessionProtocolState(binding: binding, supervisor: supervisorIdentity(),
+                    targetID: "claude", targetExecutable: targetPath,
+                    targetCodeRequirement: targetRequirement, cleanupScopePaths: mixedScopes)
+            }
         }
 
         var wrongOwner = try readyState()
@@ -223,7 +256,7 @@ private struct ManagedSessionProtocolTests {
     private static func crashClosureNeedsExitAndFDInvariant(_ c: Checks) throws {
         let binding = makeBinding()
         var eofOnly = try runningState()
-        eofOnly.observeHostControlEOF()
+        try eofOnly.observeHostControlEOF(atNanos: 350)
         try eofOnly.observeGateClosureSentinelEOF(.init(binding: binding, owner: binding.host,
                                                         source: .gateOwnedSentinelEOF))
         c.fails(.cleanupNotReady) { try eofOnly.claimCleanup(by: .supervisor(supervisorIdentity())) }
@@ -241,11 +274,11 @@ private struct ManagedSessionProtocolTests {
                   "host exit plus sentinel EOF is insufficient without the audited FD invariant")
 
         var eofAndAudit = try runningState()
-        try eofAndAudit.observeGateFDInheritanceAudit(completeGateFDAudit(binding))
+        try eofAndAudit.assumeGateFDInheritanceForFixture(hypotheticalAllGateFDsContained(binding))
         c.fails(.cleanupNotReady) { try eofAndAudit.claimCleanup(by: .supervisor(supervisorIdentity())) }
         try eofAndAudit.observeHostExit(processExit(binding.host))
         c.require(eofAndAudit.phase == .cleanupReady,
-                  "exact host exit plus complete no-escape audit is sufficient without sentinel EOF")
+                  "exact host exit plus an explicitly hypothetical fixture premise reaches the model barrier")
         try eofAndAudit.claimCleanup(by: .supervisor(supervisorIdentity()))
         c.fails(.cleanupAlreadyClaimed) {
             try eofAndAudit.claimCleanup(by: .supervisor(supervisorIdentity()))
@@ -259,14 +292,40 @@ private struct ManagedSessionProtocolTests {
             try wrongHost.observeHostExit(.init(expected: binding.host, observed: reusedPID))
         }
 
+        var currentProduction = try runningState()
+        try currentProduction.observeHostExit(processExit(binding.host))
+        let knownUnresolved = ManagedSessionSourceSnapshot.currentKnownUnresolvedEscapePaths
+        c.require(knownUnresolved == [.creationToCloexecRace, .unreviewedSpawnPath],
+                  "current production review must retain both known unresolved inheritance paths")
+        c.fails(.incompleteGateFDInheritanceAudit) {
+            try currentProduction.observeGateFDInheritanceAudit(currentProductionGateFDAudit(binding))
+        }
+        c.fails(.cleanupNotReady) {
+            try currentProduction.claimCleanup(by: .supervisor(supervisorIdentity()))
+        }
+        c.require(currentProduction.phase == .recovery,
+                  "current-source unresolved paths prevent a certified crash-cleanup barrier")
+
         var incompleteAudit = try runningState()
         try incompleteAudit.observeHostExit(processExit(binding.host))
         c.fails(.incompleteGateFDInheritanceAudit) {
-            try incompleteAudit.observeGateFDInheritanceAudit(completeGateFDAudit(binding,
+            try incompleteAudit.observeGateFDInheritanceAudit(currentProductionGateFDAudit(binding,
                 missingKinds: [.listenerPollDuplicate], missingExclusions: [.forkWithoutExec]))
         }
         c.fails(.cleanupNotReady) {
             try incompleteAudit.claimCleanup(by: .supervisor(supervisorIdentity()))
+        }
+
+        var staleSnapshot = try runningState()
+        try staleSnapshot.observeHostExit(processExit(binding.host))
+        let current = currentProductionGateFDAudit(binding)
+        let stale = ManagedSessionGateFDInheritanceAudit(binding: current.binding,
+            owner: current.owner, auditedDescriptorKinds: current.auditedDescriptorKinds,
+            excludedEscapePaths: current.excludedEscapePaths,
+            unresolvedEscapePaths: current.unresolvedEscapePaths,
+            sourceSnapshotSHA256: String(repeating: "0", count: 64))
+        c.fails(.incompleteGateFDInheritanceAudit) {
+            try staleSnapshot.observeGateFDInheritanceAudit(stale)
         }
     }
 
@@ -335,23 +394,35 @@ private struct ManagedSessionProtocolTests {
         var wrongPID = try launchPendingState()
         c.fails(.wrongChild) {
             try wrongPID.accept(.supervisorSpawnReceipt(header(binding, 2), "claude",
-                .init(requestID: requestID, returnedPID: 999, process: spawnReturn().process)),
-                observedAtNanos: 250)
+                .init(requestID: requestID, spawnStartedAtNanos: 250, returnedAtNanos: 260,
+                      returnedPID: 999, process: spawnReturn().process)),
+                observedAtNanos: 300)
         }
         c.require(wrongPID.child == nil, "spawn return PID must equal the identity snapshot PID")
 
         var state = try launchPendingState()
-        state.observeHostControlEOF()
+        try state.observeHostControlEOF(atNanos: 350)
         try state.observeHostExit(processExit(binding.host))
-        try state.observeGateFDInheritanceAudit(completeGateFDAudit(binding))
+        try state.assumeGateFDInheritanceForFixture(hypotheticalAllGateFDsContained(binding))
         c.fails(.cleanupNotReady) { try state.claimCleanup(by: .supervisor(supervisorIdentity())) }
         c.require(state.phase == .launchInFlight,
                   "host crash before a spawn receipt leaves the target PID unknown")
 
-        try state.accept(.supervisorSpawnReceipt(header(binding, 2), "claude", spawnReturn()),
+        try state.accept(.supervisorSpawnReceipt(header(binding, 2), "claude",
+            spawnReturn(startedAt: 300, returnedAt: 360)),
                          observedAtNanos: 400)
         c.require(state.phase == .cleanupReady && state.child?.pid == 402,
-                  "delayed receipt for the unique request pins the exact posix_spawn return PID")
+                  "pre-EOF spawn may deliver its exact PID receipt after EOF was observed")
+
+        var launchedAfterEOF = try launchPendingState()
+        try launchedAfterEOF.observeHostControlEOF(atNanos: 350)
+        c.fails(.invalidObservationTime) {
+            try launchedAfterEOF.accept(.supervisorSpawnReceipt(header(binding, 2), "claude",
+                spawnReturn(startedAt: 351, returnedAt: 360)), observedAtNanos: 400)
+        }
+        c.require(launchedAfterEOF.phase == .recovery && launchedAfterEOF.child == nil,
+                  "receipt for a spawn started after host EOF cannot establish child ownership")
+
         try state.claimCleanup(by: .supervisor(supervisorIdentity()))
         let child = spawnReturn().process
         try state.markTermIssued(for: child, by: .supervisor(supervisorIdentity()), at: 1_000)

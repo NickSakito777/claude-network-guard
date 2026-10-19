@@ -11,6 +11,9 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#ifdef NG_OFFLINE_TEST
+#include <stdatomic.h>
+#endif
 
 #define NG_MAX_PAIRS 64
 #define NG_LEASE_MAX_NS 3000000000ULL
@@ -43,6 +46,42 @@ struct ng_gate {
     uint64_t pending_generation;
     ng_pair pairs[NG_MAX_PAIRS];
 };
+
+#ifdef NG_OFFLINE_TEST
+static atomic_bool fail_next_fd_cloexec;
+static atomic_bool fail_next_listener_dup;
+#endif
+
+static void lock_pairs_locked(ng_gate *g);
+
+// macOS lacks atomic CLOEXEC flags for these socket()/accept() paths in the
+// supported SDK, so this marks the descriptor before publishing it. A
+// concurrent spawn can still race between descriptor creation and fcntl.
+static int set_cloexec(int fd) {
+#ifdef NG_OFFLINE_TEST
+    if (atomic_exchange(&fail_next_fd_cloexec, false)) { errno = EIO; return -1; }
+#endif
+    int flags = fcntl(fd, F_GETFD);
+    if (flags < 0) return -1;
+    return fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+}
+
+// Takes ownership even when marking fails, so an unmarked new FD never leaks.
+static int take_cloexec_fd(int fd) {
+    if (fd < 0) return -1;
+    if (set_cloexec(fd) == 0) return fd;
+    int error = errno;
+    (void)close(fd);
+    errno = error;
+    return -1;
+}
+
+static int duplicate_cloexec_fd(int fd) {
+#ifdef NG_OFFLINE_TEST
+    if (atomic_exchange(&fail_next_listener_dup, false)) { errno = EMFILE; return -1; }
+#endif
+    return fcntl(fd, F_DUPFD_CLOEXEC, 0);
+}
 
 uint64_t ng_continuous_ns(void) {
     static mach_timebase_info_data_t scale;
@@ -207,9 +246,12 @@ static int register_pending_upstream(ng_gate *g, uint64_t generation, int fd) {
     return 0;
 }
 
-static int connect_upstream(ng_gate *g, uint64_t generation) {
+static int connect_upstream(ng_gate *g, uint64_t generation, bool *fd_setup_failed) {
+    *fd_setup_failed = false;
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
+    fd = take_cloexec_fd(fd);
+    if (fd < 0) { *fd_setup_failed = true; return -1; }
     if (nonblock(fd) < 0) { close(fd); return -1; }
     if (register_pending_upstream(g, generation, fd) != 0) { close(fd); return -1; }
     struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons(7896)};
@@ -232,7 +274,17 @@ static int accept_pending_client(ng_gate *g, uint64_t *generation) {
         return -1;
     }
     int client = accept(g->listener, NULL, NULL);
-    if (client >= 0 && !begin_pending_locked(g, client, generation)) client = -1;
+    if (client >= 0) {
+        client = take_cloexec_fd(client);
+        if (client < 0) {
+            int error = errno;
+            lock_pairs_locked(g);
+            pthread_mutex_unlock(&g->mu);
+            errno = error;
+            return -1;
+        }
+        if (!begin_pending_locked(g, client, generation)) client = -1;
+    }
     pthread_mutex_unlock(&g->mu);
     return client;
 }
@@ -256,7 +308,7 @@ static void *accept_loop(void *opaque) {
     while (1) {
         pthread_mutex_lock(&g->mu);
         bool keep = g->accepting && !g->destroyed;
-        int listener = keep && g->listener >= 0 ? dup(g->listener) : -1;
+        int listener = keep && g->listener >= 0 ? duplicate_cloexec_fd(g->listener) : -1;
         pthread_mutex_unlock(&g->mu);
         if (!keep) break;
         if (listener < 0) { ng_lock(g); break; }
@@ -266,10 +318,11 @@ static void *accept_loop(void *opaque) {
         uint64_t generation = 0;
         int client = accept_pending_client(g, &generation);
         if (client < 0) continue;
-        if (connect_upstream(g, generation) < 0) {
+        bool fd_setup_failed = false;
+        if (connect_upstream(g, generation, &fd_setup_failed) < 0) {
             bool same_live_generation = current_generation(g) == generation;
             finish_pending(g, generation);
-            if (same_live_generation) ng_lock(g);
+            if (same_live_generation || fd_setup_failed) ng_lock(g);
             continue;
         }
         (void)adopt_pending(g, generation);
@@ -300,6 +353,13 @@ int ng_bind_loopback_port(ng_gate *g, uint16_t port) {
     }
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) { int e = errno; pthread_mutex_unlock(&g->mu); return e; }
+    fd = take_cloexec_fd(fd);
+    if (fd < 0) {
+        int e = errno;
+        lock_pairs_locked(g);
+        pthread_mutex_unlock(&g->mu);
+        return e;
+    }
     struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons(port)};
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     // Deliberately no SO_REUSEPORT: an old owner must release this endpoint first.
@@ -384,6 +444,20 @@ void ng_revoke(ng_gate *g) {
 #ifdef NG_OFFLINE_TEST
 int ng_test_adopt_pair(ng_gate *g, int client_fd, int upstream_fd) {
     if (!g || client_fd < 0 || upstream_fd < 0) return EINVAL;
+    client_fd = take_cloexec_fd(client_fd);
+    if (client_fd < 0) {
+        int error = errno;
+        close(upstream_fd);
+        ng_lock(g);
+        return error;
+    }
+    upstream_fd = take_cloexec_fd(upstream_fd);
+    if (upstream_fd < 0) {
+        int error = errno;
+        close(client_fd);
+        ng_lock(g);
+        return error;
+    }
     uint64_t generation = 0;
     pthread_mutex_lock(&g->mu);
     if (!begin_pending_locked(g, client_fd, &generation)) {
@@ -396,6 +470,12 @@ int ng_test_adopt_pair(ng_gate *g, int client_fd, int upstream_fd) {
 }
 int ng_test_begin_pending(ng_gate *g, int client_fd, uint64_t *generation) {
     if (!g || client_fd < 0 || !generation) return EINVAL;
+    client_fd = take_cloexec_fd(client_fd);
+    if (client_fd < 0) {
+        int error = errno;
+        ng_lock(g);
+        return error;
+    }
     pthread_mutex_lock(&g->mu);
     bool accepted = begin_pending_locked(g, client_fd, generation);
     pthread_mutex_unlock(&g->mu);
@@ -403,6 +483,13 @@ int ng_test_begin_pending(ng_gate *g, int client_fd, uint64_t *generation) {
 }
 int ng_test_register_pending_upstream(ng_gate *g, uint64_t generation, int upstream_fd) {
     if (!g || !generation || upstream_fd < 0) return EINVAL;
+    upstream_fd = take_cloexec_fd(upstream_fd);
+    if (upstream_fd < 0) {
+        int error = errno;
+        finish_pending(g, generation);
+        ng_lock(g);
+        return error;
+    }
     return register_pending_upstream(g, generation, upstream_fd);
 }
 int ng_test_adopt_pending(ng_gate *g, uint64_t generation) {
@@ -419,9 +506,36 @@ int ng_test_take_listener_fd(ng_gate *g, int unix_fd) {
     if (g->listener >= 0 || !g->test_mode) {
         pthread_mutex_unlock(&g->mu); return EPERM;
     }
+    unix_fd = take_cloexec_fd(unix_fd);
+    if (unix_fd < 0) {
+        int error = errno;
+        lock_pairs_locked(g);
+        pthread_mutex_unlock(&g->mu);
+        return error;
+    }
     g->listener = unix_fd;
     pthread_mutex_unlock(&g->mu);
     return 0;
+}
+void ng_test_fail_next_fd_cloexec(void) {
+    atomic_store(&fail_next_fd_cloexec, true);
+}
+void ng_test_fail_next_listener_dup(void) {
+    atomic_store(&fail_next_listener_dup, true);
+}
+int ng_test_duplicate_listener_fd(ng_gate *g) {
+    if (!g) return -1;
+    pthread_mutex_lock(&g->mu);
+    bool has_listener = g->listener >= 0;
+    int duplicate = has_listener ? duplicate_cloexec_fd(g->listener) : -1;
+    bool failed = has_listener && duplicate < 0;
+    int error = errno;
+    pthread_mutex_unlock(&g->mu);
+    if (failed) {
+        ng_lock(g);
+        errno = error;
+    }
+    return duplicate;
 }
 #endif
 void ng_tick(ng_gate *g) {

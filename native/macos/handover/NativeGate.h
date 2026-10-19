@@ -23,7 +23,10 @@ int ng_test_begin_pending(ng_gate *gate, int client_fd, uint64_t *generation);
 int ng_test_register_pending_upstream(ng_gate *gate, uint64_t generation, int upstream_fd); // Takes ownership on success.
 int ng_test_adopt_pending(ng_gate *gate, uint64_t generation);
 void ng_test_enable(ng_gate *gate); // offline fixture only; never binds
-int ng_test_take_listener_fd(ng_gate *gate, int unix_fd); // owned Unix fixture FD
+int ng_test_take_listener_fd(ng_gate *gate, int unix_fd); // takes an owned Unix fixture FD
+void ng_test_fail_next_fd_cloexec(void); // injects an offline-only fcntl failure
+void ng_test_fail_next_listener_dup(void); // injects an offline-only duplicate failure
+int ng_test_duplicate_listener_fd(ng_gate *gate); // exercises the poll duplicate path without a listener thread
 #endif
 uint64_t ng_continuous_ns(void);
 int ng_is_open(ng_gate *gate);

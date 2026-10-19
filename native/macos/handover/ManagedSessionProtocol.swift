@@ -7,7 +7,7 @@ enum ManagedSessionProtocolFailure: Error, Equatable {
     case invalidGateReadback, wrongHost, wrongSupervisor
     case cleanupNotReady, cleanupAlreadyClaimed, wrongChild, gracePeriod
     case cleanupOwnerMismatch, launchRequestMismatch, heartbeatClockWentBackwards
-    case incompleteGateFDInheritanceAudit, incompleteInventory, nonceUnavailable
+    case invalidObservationTime, incompleteGateFDInheritanceAudit, incompleteInventory, nonceUnavailable
 }
 
 struct ManagedSessionProcessIdentity: Codable, Equatable {
@@ -85,10 +85,14 @@ struct ManagedSessionGateReadback: Equatable {
     }
 }
 
-// The spawn adapter must bind this to the exact request and fill returnedPID
-// directly from posix_spawn's return value. A process lookup is not a spawn receipt.
+// The spawn adapter must revalidate the bound host and current Gate lease at
+// the final admission boundary, serialize that check against cancellation/EOF,
+// and capture both timestamps from the same monotonic clock around posix_spawn.
+// The return PID must come directly from posix_spawn; a process lookup is not a receipt.
 struct ManagedSessionSpawnReturn: Equatable {
     let requestID: UUID
+    let spawnStartedAtNanos: UInt64
+    let returnedAtNanos: UInt64
     let returnedPID: Int32
     let process: ManagedSessionProcessIdentity
 }
@@ -136,8 +140,8 @@ struct ManagedSessionGateClosureWitness {
 
 // These source-audit inputs describe every descriptor class and escape route.
 // They are not runtime observations and this file has no production producer.
-// An integration must create this value only after auditing the Gate code and
-// all spawn/FD-transfer paths, then keep the audit tied to the shipped revision.
+// The source digest is only a freshness check; a complete review must separately
+// resolve every escape path. Current known-unresolved paths block this barrier.
 enum ManagedSessionGateDescriptorKind: Hashable, CaseIterable {
     case listener, listenerPollDuplicate, acceptedClient, pendingUpstream
     case activeClient, activeUpstream, closureSentinel
@@ -153,12 +157,35 @@ struct ManagedSessionGateFDInheritanceAudit: Equatable {
     let owner: ManagedSessionProcessIdentity
     let auditedDescriptorKinds: Set<ManagedSessionGateDescriptorKind>
     let excludedEscapePaths: Set<ManagedSessionGateFDEscapePath>
+    let unresolvedEscapePaths: Set<ManagedSessionGateFDEscapePath>
+    let sourceSnapshotSHA256: String
 
     var isComplete: Bool {
+        // A matching digest only says the selected source snapshot is fresh.
+        // It cannot turn known-unresolved production paths into proof.
+        ManagedSessionSourceSnapshot.currentKnownUnresolvedEscapePaths.isEmpty &&
         auditedDescriptorKinds == Set(ManagedSessionGateDescriptorKind.allCases) &&
-        excludedEscapePaths == Set(ManagedSessionGateFDEscapePath.allCases)
+        excludedEscapePaths == Set(ManagedSessionGateFDEscapePath.allCases) &&
+        unresolvedEscapePaths.isEmpty &&
+        sourceSnapshotSHA256 == ManagedSessionSourceSnapshot.sha256
     }
 }
+
+#if MANAGED_SESSION_FIXTURE_TESTS
+// This is a hypothetical state-machine premise, not an audit of the current
+// source tree. It has no source digest and is absent from non-fixture builds.
+struct ManagedSessionGateFDInheritanceFixtureAssumption: Equatable {
+    let binding: ManagedSessionBinding
+    let owner: ManagedSessionProcessIdentity
+    let assumedDescriptorKindsContained: Set<ManagedSessionGateDescriptorKind>
+    let assumedEscapePathsAbsent: Set<ManagedSessionGateFDEscapePath>
+
+    var isCompleteHypothesis: Bool {
+        assumedDescriptorKindsContained == Set(ManagedSessionGateDescriptorKind.allCases) &&
+        assumedEscapePathsAbsent == Set(ManagedSessionGateFDEscapePath.allCases)
+    }
+}
+#endif
 
 // OS process observers must revalidate exact PID/UID/birth/path/signature and
 // return this typed observation. The state machine itself cannot prove exit.
@@ -211,20 +238,32 @@ struct ManagedSessionProtocolState {
     private var nextSupervisorSequence: UInt64 = 1
     private var lastHeartbeatNanos: UInt64?
     private var supervisorAlive = true
-    private var hostControlEOF = false
+    private var hostControlEOFAtNanos: UInt64?
     private var hostExitObserved = false
     private var gateFDInheritanceAudited = false
     private var gracefulGateLockedAndEmpty = false
     private var pendingLaunchRequestID: UUID?
+    private var pendingLaunchRequestedAtNanos: UInt64?
     private var phaseBeforeSupervisorExit: Phase?
     private var cleanupClaimed = false
     private var termAtNanos: UInt64?
     private var killIssued = false
 
+    private var hostControlEOF: Bool { hostControlEOFAtNanos != nil }
+
+    private static func appContentsScope(for executablePath: String) -> String? {
+        let components = executablePath.split(separator: "/")
+        guard let appIndex = components.lastIndex(where: { $0.hasSuffix(".app") }),
+              appIndex + 2 < components.endIndex,
+              components[appIndex + 1] == "Contents" else { return nil }
+        return "/" + components[..<(appIndex + 2)].joined(separator: "/") + "/"
+    }
+
     init(binding: ManagedSessionBinding, supervisor: ManagedSessionProcessIdentity,
          targetID: String, targetExecutable: String, targetCodeRequirement: String,
          cleanupScopePaths: Set<String>) throws {
-        guard binding.isValid, supervisor.isValid, supervisor.uid == binding.host.uid,
+        guard let targetContentsScope = Self.appContentsScope(for: targetExecutable),
+              binding.isValid, supervisor.isValid, supervisor.uid == binding.host.uid,
               !targetID.isEmpty, targetID.utf8.count <= 64,
               !targetID.unicodeScalars.contains(where: { $0.value == 0 }),
               targetExecutable.hasPrefix("/"), !targetExecutable.hasSuffix("/"),
@@ -235,11 +274,12 @@ struct ManagedSessionProtocolState {
               !targetCodeRequirement.unicodeScalars.contains(where: { $0.value == 0 }),
               !cleanupScopePaths.isEmpty,
               cleanupScopePaths.contains(where: { scope in
-                  targetExecutable == scope ||
-                  targetExecutable.hasPrefix(scope.hasSuffix("/") ? scope : scope + "/")
+                  scope.hasPrefix(targetContentsScope) && targetExecutable.hasPrefix(scope)
               }),
               cleanupScopePaths.allSatisfy({ path in
+                  path.hasPrefix(targetContentsScope) &&
                   path.hasPrefix("/") && !path.contains("//") &&
+                  path.hasSuffix("/") &&
                   !path.unicodeScalars.contains(where: { $0.value == 0 }) &&
                   !path.split(separator: "/").contains(where: { $0 == "." || $0 == ".." })
               }) else {
@@ -309,6 +349,7 @@ struct ManagedSessionProtocolState {
                 throw ManagedSessionProtocolFailure.launchRequestMismatch
             }
             pendingLaunchRequestID = requestID
+            pendingLaunchRequestedAtNanos = observedAtNanos
             phase = .launchInFlight
 
         case .supervisorSpawnReceipt(_, let target, let spawnReturn):
@@ -316,8 +357,15 @@ struct ManagedSessionProtocolState {
                 throw ManagedSessionProtocolFailure.invalidTransition
             }
             guard let pendingRequest = pendingLaunchRequestID,
+                  let requestedAt = pendingLaunchRequestedAtNanos,
                   spawnReturn.requestID == pendingRequest else {
                 throw ManagedSessionProtocolFailure.launchRequestMismatch
+            }
+            guard spawnReturn.spawnStartedAtNanos >= requestedAt,
+                  spawnReturn.returnedAtNanos >= spawnReturn.spawnStartedAtNanos,
+                  spawnReturn.returnedAtNanos <= observedAtNanos,
+                  hostControlEOFAtNanos.map({ spawnReturn.spawnStartedAtNanos < $0 }) ?? true else {
+                throw ManagedSessionProtocolFailure.invalidObservationTime
             }
             let process = spawnReturn.process
             guard process.isValid, process.uid == binding.host.uid,
@@ -329,6 +377,7 @@ struct ManagedSessionProtocolState {
             }
             child = process
             pendingLaunchRequestID = nil
+            pendingLaunchRequestedAtNanos = nil
             phase = .running
             updateCleanupReadiness()
 
@@ -385,9 +434,15 @@ struct ManagedSessionProtocolState {
         phase = .gateOpen
     }
 
-    // EOF is transport evidence only. It proves neither host exit nor Gate closure.
-    mutating func observeHostControlEOF() {
-        hostControlEOF = true
+    // EOF time is when the adapter observed the transport close, not the exact
+    // host exit time. A delayed receipt is admissible only if spawn began first.
+    mutating func observeHostControlEOF(atNanos: UInt64) throws {
+        guard atNanos > 0,
+              hostControlEOFAtNanos.map({ atNanos >= $0 }) ?? true else {
+            enterRecovery()
+            throw ManagedSessionProtocolFailure.invalidObservationTime
+        }
+        hostControlEOFAtNanos = atNanos
     }
 
     // Input from an OS-backed process observer, not a fact validated by this
@@ -425,6 +480,25 @@ struct ManagedSessionProtocolState {
         gateFDInheritanceAudited = true
         updateCleanupReadiness()
     }
+
+#if MANAGED_SESSION_FIXTURE_TESTS
+    // Exercises the crash-barrier transition under an explicitly imaginary
+    // all-paths-contained premise. Never use this to represent source evidence.
+    mutating func assumeGateFDInheritanceForFixture(
+        _ assumption: ManagedSessionGateFDInheritanceFixtureAssumption
+    ) throws {
+        guard assumption.binding == binding, assumption.owner == binding.host else {
+            enterRecovery()
+            throw ManagedSessionProtocolFailure.invalidGateReadback
+        }
+        guard assumption.isCompleteHypothesis else {
+            enterRecovery()
+            throw ManagedSessionProtocolFailure.incompleteGateFDInheritanceAudit
+        }
+        gateFDInheritanceAudited = true
+        updateCleanupReadiness()
+    }
+#endif
 
     // The process adapter must confirm this exact birth identity is no longer
     // live. A matching PID by itself is not sufficient.

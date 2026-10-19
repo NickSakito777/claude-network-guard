@@ -2,14 +2,21 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <spawn.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+extern char **environ;
 
 static void readable(int fd) {
     struct pollfd p = {.fd = fd, .events = POLLIN | POLLHUP};
@@ -85,7 +92,171 @@ static int install_reused_socket_endpoint(int target_fd) {
     return peer;
 }
 
-int main(void) {
+static bool is_stream_socket(int fd) {
+    int type = 0;
+    socklen_t length = sizeof(type);
+    return fcntl(fd, F_GETFD) >= 0 &&
+           getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &length) == 0 &&
+           type == SOCK_STREAM;
+}
+
+static int fd_probe_main(int argc, char **argv) {
+    if (argc < 4 || strcmp(argv[1], "--fd-probe") != 0 || (argc - 2) % 2 != 0) return 2;
+    for (int i = 2; i < argc; i += 2) {
+        char *end = NULL;
+        long value = strtol(argv[i], &end, 10);
+        if (!end || *end || value < 0 || value > INT_MAX) return 3;
+        bool expected_open = strcmp(argv[i + 1], "open") == 0;
+        if (!expected_open && strcmp(argv[i + 1], "closed") != 0) return 4;
+        if (is_stream_socket((int)value) != expected_open) return 5;
+    }
+    return 0;
+}
+
+static void assert_cloexec(int fd) {
+    int flags = fcntl(fd, F_GETFD);
+    assert(flags >= 0 && (flags & FD_CLOEXEC));
+}
+
+static void assert_closed(int fd) {
+    errno = 0;
+    assert(fcntl(fd, F_GETFD) == -1 && errno == EBADF);
+}
+
+static void probe_exec_inheritance(const char *executable, const int *fds,
+                                  const bool *expected_open, size_t count) {
+    char fd_values[8][24];
+    char *arguments[2 + 2 * 8 + 1];
+    assert(count <= 8);
+    arguments[0] = (char *)executable;
+    arguments[1] = "--fd-probe";
+    for (size_t i = 0; i < count; ++i) {
+        snprintf(fd_values[i], sizeof(fd_values[i]), "%d", fds[i]);
+        arguments[2 + 2 * i] = fd_values[i];
+        arguments[3 + 2 * i] = expected_open[i] ? "open" : "closed";
+    }
+    arguments[2 + 2 * count] = NULL;
+    pid_t pid = -1;
+    assert(posix_spawn(&pid, executable, NULL, NULL, arguments, environ) == 0);
+    int status = 0;
+    assert(waitpid(pid, &status, 0) == pid);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
+static void test_gate_fd_cloexec_exec(const char *executable) {
+    ng_gate *gate = ng_create();
+    assert(gate);
+    ng_test_enable(gate);
+
+    int listener[2], client[2], upstream[2], control[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, listener) == 0);
+    assert(ng_test_take_listener_fd(gate, listener[0]) == 0);
+    assert_cloexec(listener[0]);
+    int listener_copy = ng_test_duplicate_listener_fd(gate);
+    assert(listener_copy >= 0);
+    assert_cloexec(listener_copy);
+
+    assert(ng_renew(gate, 1, 3000000000ULL) == 0);
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, client) == 0);
+    uint64_t generation = 0;
+    assert(ng_test_begin_pending(gate, client[1], &generation) == 0);
+    assert_cloexec(client[1]);
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, upstream) == 0);
+    assert(ng_test_register_pending_upstream(gate, generation, upstream[0]) == 0);
+    assert_cloexec(upstream[0]);
+    assert(ng_test_adopt_pending(gate, generation) == 0);
+    assert(ng_active_pairs(gate) == 1);
+
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, control) == 0);
+    int control_flags = fcntl(control[0], F_GETFD);
+    assert(control_flags >= 0 && !(control_flags & FD_CLOEXEC));
+    int probe_fds[] = {listener[0], listener_copy, client[1], upstream[0], control[0]};
+    bool expected_open[] = {false, false, false, false, true};
+    probe_exec_inheritance(executable, probe_fds, expected_open,
+                           sizeof(probe_fds) / sizeof(probe_fds[0]));
+
+    ng_lock(gate);
+    ng_revoke(gate);
+    close(listener[1]);
+    close(client[0]);
+    close(upstream[1]);
+    close(control[0]); close(control[1]);
+    close(listener_copy);
+    ng_destroy(gate);
+}
+
+static void test_fd_setup_failures_close_and_lock(void) {
+    int pair[2];
+    uint64_t generation = 0;
+
+    ng_gate *gate = ng_create();
+    assert(gate);
+    ng_test_enable(gate);
+    assert(ng_renew(gate, 1, 3000000000ULL) == 0);
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0);
+    ng_test_fail_next_fd_cloexec();
+    assert(ng_test_take_listener_fd(gate, pair[0]) == EIO);
+    assert_closed(pair[0]);
+    assert(!ng_is_open(gate) && !ng_is_bound(gate));
+    close(pair[1]);
+    ng_destroy(gate);
+
+    gate = ng_create();
+    assert(gate);
+    ng_test_enable(gate);
+    assert(ng_renew(gate, 1, 3000000000ULL) == 0);
+    int client[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, client) == 0);
+    ng_test_fail_next_fd_cloexec();
+    assert(ng_test_begin_pending(gate, client[1], &generation) == EIO);
+    assert_closed(client[1]);
+    assert(!ng_is_open(gate) && ng_active_pairs(gate) == 0);
+    readable(client[0]);
+    char byte = 0;
+    assert(read(client[0], &byte, 1) == 0);
+    close(client[0]);
+    ng_destroy(gate);
+
+    gate = ng_create();
+    assert(gate);
+    ng_test_enable(gate);
+    assert(ng_renew(gate, 1, 3000000000ULL) == 0);
+    int listener[2], pending[2], upstream[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, listener) == 0);
+    assert(ng_test_take_listener_fd(gate, listener[0]) == 0);
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, pending) == 0);
+    assert(ng_test_begin_pending(gate, pending[1], &generation) == 0);
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, upstream) == 0);
+    ng_test_fail_next_fd_cloexec();
+    assert(ng_test_register_pending_upstream(gate, generation, upstream[0]) == EIO);
+    assert_closed(upstream[0]);
+    assert_closed(pending[1]);
+    assert(!ng_is_open(gate) && ng_active_pairs(gate) == 0);
+    readable(pending[0]);
+    assert(read(pending[0], &byte, 1) == 0);
+    close(listener[1]); close(pending[0]); close(upstream[1]);
+    ng_destroy(gate);
+
+    gate = ng_create();
+    assert(gate);
+    ng_test_enable(gate);
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, listener) == 0);
+    assert(ng_test_take_listener_fd(gate, listener[0]) == 0);
+    assert(ng_renew(gate, 1, 3000000000ULL) == 0);
+    ng_test_fail_next_listener_dup();
+    errno = 0;
+    assert(ng_test_duplicate_listener_fd(gate) == -1 && errno == EMFILE);
+    assert(!ng_is_open(gate) && ng_is_bound(gate));
+    ng_revoke(gate);
+    close(listener[1]);
+    ng_destroy(gate);
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1) return fd_probe_main(argc, argv);
+    test_gate_fd_cloexec_exec(argv[0]);
+    test_fd_setup_failures_close_and_lock();
+
     ng_gate *gate = ng_create();
     assert(gate && !ng_is_open(gate));
     assert(ng_bind_loopback_port(gate, 7896) == EINVAL);
@@ -101,6 +272,8 @@ int main(void) {
     assert(socketpair(AF_UNIX, SOCK_STREAM, 0, client) == 0);
     assert(socketpair(AF_UNIX, SOCK_STREAM, 0, upstream) == 0);
     assert(ng_test_adopt_pair(gate, client[1], upstream[0]) == 0);
+    assert_cloexec(client[1]);
+    assert_cloexec(upstream[0]);
     assert(write(client[0], "hi", 2) == 2);
     readable(upstream[1]);
     char data[4] = {0};
@@ -218,5 +391,6 @@ int main(void) {
     assert(fcntl(pending_upstream_fd, F_GETFD) == -1 && errno == EBADF);
     close(reused_client_peer); close(reused_upstream_peer);
     ng_destroy(gate);
+    puts("NativeGate CLOEXEC and FD failure fixtures passed");
     return 0;
 }
