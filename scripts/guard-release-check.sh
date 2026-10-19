@@ -47,5 +47,6 @@ run_bun test src/guard-model.test.ts src/i18n.test.ts
 run_bun run build
 python3 scripts/test-guard-artifact-metadata.py
 sh scripts/check-guard-native.sh
+sh native/tests/run-managed-session-protocol-tests.sh
 sh native/tests/run-lulu-manifest-target-tests.sh
 sh native/tests/run-lulu-policy-target-tests.sh
