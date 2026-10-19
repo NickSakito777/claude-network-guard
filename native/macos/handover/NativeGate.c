@@ -39,16 +39,20 @@ struct ng_gate {
     pthread_t accept_thread;
     bool accepting;
     bool accept_started;
+    bool accept_exited;
     bool accept_joining;
     bool accept_joined;
 #ifdef NG_OFFLINE_TEST
     bool test_mode;
+    bool test_hold_drain;
 #endif
     bool opened;
     bool locking;
+    bool lock_tokens_exhausted;
     bool destroyed;
     uint64_t generation;
     uint64_t deadline_ns;
+    uint64_t lock_epoch;
     int pending_client, pending_upstream;
     uint64_t pending_generation;
     ng_pair pairs[NG_MAX_PAIRS];
@@ -59,7 +63,7 @@ static atomic_bool fail_next_fd_cloexec;
 static atomic_bool fail_next_listener_dup;
 #endif
 
-static void lock_pairs_locked(ng_gate *g);
+static int lock_pairs_locked(ng_gate *g);
 
 // macOS lacks atomic CLOEXEC flags for these socket()/accept() paths in the
 // supported SDK, so this marks the descriptor before publishing it. A
@@ -107,11 +111,13 @@ static bool live(ng_gate *g) {
     pthread_mutex_unlock(&g->mu);
     return ok;
 }
-static uint64_t current_generation(ng_gate *g) {
+static int lock_if_live_generation(ng_gate *g, uint64_t generation) {
     pthread_mutex_lock(&g->mu);
-    uint64_t generation = live_locked(g) ? g->generation : 0;
+    int rc = 0;
+    if (live_locked(g) && g->generation == generation)
+        rc = lock_pairs_locked(g);
     pthread_mutex_unlock(&g->mu);
-    return generation;
+    return rc;
 }
 static ssize_t send_if_live(ng_gate *g, int fd, const void *data, size_t length) {
     pthread_mutex_lock(&g->mu);
@@ -253,12 +259,11 @@ static int register_pending_upstream(ng_gate *g, uint64_t generation, int fd) {
     return 0;
 }
 
-static int connect_upstream(ng_gate *g, uint64_t generation, bool *fd_setup_failed) {
-    *fd_setup_failed = false;
+static int connect_upstream(ng_gate *g, uint64_t generation) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     fd = take_cloexec_fd(fd);
-    if (fd < 0) { *fd_setup_failed = true; return -1; }
+    if (fd < 0) return -1;
     if (nonblock(fd) < 0) { close(fd); return -1; }
     if (register_pending_upstream(g, generation, fd) != 0) { close(fd); return -1; }
     struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons(7896)};
@@ -316,24 +321,28 @@ static void *accept_loop(void *opaque) {
         pthread_mutex_lock(&g->mu);
         bool keep = g->accepting && !g->destroyed;
         int listener = keep && g->listener >= 0 ? duplicate_cloexec_fd(g->listener) : -1;
+        bool listener_failed = keep && listener < 0;
+        if (listener_failed) (void)lock_pairs_locked(g);
         pthread_mutex_unlock(&g->mu);
         if (!keep) break;
-        if (listener < 0) { ng_lock(g); break; }
+        if (listener_failed) break;
         struct pollfd wait = {.fd = listener, .events = POLLIN};
         if (poll(&wait, 1, 100) <= 0) { close(listener); ng_tick(g); continue; }
         close(listener);
         uint64_t generation = 0;
         int client = accept_pending_client(g, &generation);
         if (client < 0) continue;
-        bool fd_setup_failed = false;
-        if (connect_upstream(g, generation, &fd_setup_failed) < 0) {
-            bool same_live_generation = current_generation(g) == generation;
+        if (connect_upstream(g, generation) < 0) {
             finish_pending(g, generation);
-            if (same_live_generation || fd_setup_failed) ng_lock(g);
+            (void)lock_if_live_generation(g, generation);
             continue;
         }
         (void)adopt_pending(g, generation);
     }
+    pthread_mutex_lock(&g->mu);
+    g->accept_exited = true;
+    pthread_cond_broadcast(&g->idle);
+    pthread_mutex_unlock(&g->mu);
     return NULL;
 }
 
@@ -374,8 +383,9 @@ int ng_bind_loopback_port(ng_gate *g, uint16_t port) {
         int e = errno; close(fd); pthread_mutex_unlock(&g->mu); return e;
     }
     g->listener = fd; g->accepting = true; g->opened = false;
+    g->accept_exited = false;
     int rc = pthread_create(&g->accept_thread, NULL, accept_loop, g);
-    if (rc) { g->accepting = false; close(fd); g->listener = -1; }
+    if (rc) { g->accepting = false; close(fd); g->listener = -1; g->accept_exited = true; }
     else g->accept_started = true;
     pthread_mutex_unlock(&g->mu);
     return rc;
@@ -403,8 +413,7 @@ int ng_renew(ng_gate *g, uint64_t generation, uint64_t lease_ns) {
     return rc;
 }
 
-static void lock_pairs_locked(ng_gate *g) {
-    while (g->locking) pthread_cond_wait(&g->idle, &g->mu);
+static int begin_lock_locked(ng_gate *g, uint64_t *ticket) {
     g->locking = true;
     g->opened = false; g->deadline_ns = 0;
     if (g->pending_client >= 0) shutdown(g->pending_client, SHUT_RDWR);
@@ -413,14 +422,141 @@ static void lock_pairs_locked(ng_gate *g) {
         if (g->pairs[i].client >= 0) shutdown(g->pairs[i].client, SHUT_RDWR);
         if (g->pairs[i].upstream >= 0) shutdown(g->pairs[i].upstream, SHUT_RDWR);
     }
-    for (;;) {
-        bool running = false;
-        for (size_t i = 0; i < NG_MAX_PAIRS; ++i) running |= g->pairs[i].running;
-        if (!running && g->pending_client < 0) break;
-        pthread_cond_wait(&g->idle, &g->mu);
+    int result = 0;
+    if (g->lock_epoch == UINT64_MAX) {
+        g->lock_tokens_exhausted = true;
+        if (ticket) *ticket = 0;
+        result = EOVERFLOW;
+    } else {
+        ++g->lock_epoch;
+        if (ticket) *ticket = g->lock_epoch;
     }
+    pthread_cond_broadcast(&g->idle);
+    return result;
+}
+
+static bool lock_ticket_current_locked(ng_gate *g, uint64_t ticket) {
+    return ticket != 0 && !g->lock_tokens_exhausted && g->locking &&
+           ticket == g->lock_epoch;
+}
+
+static bool idle_locked(ng_gate *g) {
+    bool running = false;
+    for (size_t i = 0; i < NG_MAX_PAIRS; ++i) running |= g->pairs[i].running;
+    return !running && g->pending_client < 0 && g->pending_upstream < 0;
+}
+
+static int wait_condition_until_locked(ng_gate *g, uint64_t deadline_ns) {
+    uint64_t now = ng_continuous_ns();
+    if (now >= deadline_ns) return ETIMEDOUT;
+    uint64_t remaining = deadline_ns - now;
+    struct timespec timeout = {
+        .tv_sec = (time_t)(remaining / 1000000000ULL),
+        .tv_nsec = (long)(remaining % 1000000000ULL),
+    };
+    int rc = pthread_cond_timedwait_relative_np(&g->idle, &g->mu, &timeout);
+    if (rc == ETIMEDOUT && ng_continuous_ns() < deadline_ns) return 0;
+    return rc;
+}
+
+static int wait_idle_until_locked(ng_gate *g, uint64_t ticket, uint64_t deadline_ns) {
+#ifdef NG_OFFLINE_TEST
+    while (lock_ticket_current_locked(g, ticket) && g->test_hold_drain) {
+        int rc = wait_condition_until_locked(g, deadline_ns);
+        if (rc) return rc;
+    }
+#endif
+    while (lock_ticket_current_locked(g, ticket) && !idle_locked(g)) {
+        int rc = wait_condition_until_locked(g, deadline_ns);
+        if (rc) return rc;
+    }
+    return lock_ticket_current_locked(g, ticket) ? 0 : ECANCELED;
+}
+
+static int lock_pairs_locked(ng_gate *g) {
+    uint64_t ticket = 0;
+    int rc = begin_lock_locked(g, &ticket);
+    if (rc) {
+        while (!idle_locked(g)) pthread_cond_wait(&g->idle, &g->mu);
+        return rc;
+    }
+#ifdef NG_OFFLINE_TEST
+    while (lock_ticket_current_locked(g, ticket) && g->test_hold_drain)
+        pthread_cond_wait(&g->idle, &g->mu);
+#endif
+    while (lock_ticket_current_locked(g, ticket) && !idle_locked(g))
+        pthread_cond_wait(&g->idle, &g->mu);
+    if (!lock_ticket_current_locked(g, ticket)) return ECANCELED;
     g->locking = false;
     pthread_cond_broadcast(&g->idle);
+    return 0;
+}
+
+int ng_begin_lock(ng_gate *g, uint64_t *ticket) {
+    if (!g || !ticket) return EINVAL;
+    pthread_mutex_lock(&g->mu);
+    int rc = begin_lock_locked(g, ticket);
+    pthread_mutex_unlock(&g->mu);
+    return rc;
+}
+
+int ng_lock_until(ng_gate *g, uint64_t ticket, uint64_t deadline_ns) {
+    if (!g || !ticket || !deadline_ns) return EINVAL;
+    pthread_mutex_lock(&g->mu);
+    if (!lock_ticket_current_locked(g, ticket)) {
+        pthread_mutex_unlock(&g->mu);
+        return ECANCELED;
+    }
+    if (g->opened) {
+        pthread_mutex_unlock(&g->mu);
+        return EBUSY;
+    }
+    int rc = wait_idle_until_locked(g, ticket, deadline_ns);
+    if (!rc) {
+        g->locking = false;
+        pthread_cond_broadcast(&g->idle);
+    }
+    pthread_mutex_unlock(&g->mu);
+    return rc;
+}
+
+int ng_begin_revoke(ng_gate *g, uint64_t *ticket) {
+    if (!g || !ticket) return EINVAL;
+    pthread_mutex_lock(&g->mu);
+    int rc = begin_lock_locked(g, ticket);
+    g->accepting = false;
+    if (g->listener >= 0) {
+        shutdown(g->listener, SHUT_RDWR);
+        close(g->listener);
+        g->listener = -1;
+    }
+    pthread_mutex_unlock(&g->mu);
+    return rc;
+}
+
+int ng_revoke_until(ng_gate *g, uint64_t ticket, uint64_t deadline_ns) {
+    if (!g || !ticket || !deadline_ns) return EINVAL;
+    pthread_mutex_lock(&g->mu);
+    if (!lock_ticket_current_locked(g, ticket)) {
+        pthread_mutex_unlock(&g->mu);
+        return ECANCELED;
+    }
+    if (g->opened || g->listener >= 0 || g->accepting) {
+        pthread_mutex_unlock(&g->mu);
+        return EBUSY;
+    }
+    int rc = wait_idle_until_locked(g, ticket, deadline_ns);
+    while (!rc && lock_ticket_current_locked(g, ticket) &&
+           g->accept_started && !g->accept_exited) {
+        rc = wait_condition_until_locked(g, deadline_ns);
+    }
+    if (!rc && !lock_ticket_current_locked(g, ticket)) rc = ECANCELED;
+    if (!rc) {
+        g->locking = false;
+        pthread_cond_broadcast(&g->idle);
+    }
+    pthread_mutex_unlock(&g->mu);
+    return rc;
 }
 void ng_lock(ng_gate *g) {
     if (!g) return;
@@ -499,6 +635,20 @@ int ng_test_register_pending_upstream(ng_gate *g, uint64_t generation, int upstr
     }
     return register_pending_upstream(g, generation, upstream_fd);
 }
+int ng_test_finish_pending(ng_gate *g, uint64_t generation) {
+    if (!g || !generation) return EINVAL;
+    pthread_mutex_lock(&g->mu);
+    int result = EPERM;
+    if (g->test_mode) {
+        result = ENOENT;
+        if (g->pending_client >= 0 && g->pending_generation == generation) {
+            close_pending_locked(g);
+            result = 0;
+        }
+    }
+    pthread_mutex_unlock(&g->mu);
+    return result;
+}
 int ng_test_adopt_pending(ng_gate *g, uint64_t generation) {
     if (!g || !generation) return EINVAL;
     return adopt_pending(g, generation);
@@ -544,13 +694,43 @@ int ng_test_duplicate_listener_fd(ng_gate *g) {
     }
     return duplicate;
 }
+int ng_test_hold_drain(ng_gate *g) {
+    if (!g) return EINVAL;
+    pthread_mutex_lock(&g->mu);
+    if (!g->test_mode) {
+        pthread_mutex_unlock(&g->mu);
+        return EPERM;
+    }
+    g->test_hold_drain = true;
+    pthread_mutex_unlock(&g->mu);
+    return 0;
+}
+int ng_test_release_drain(ng_gate *g) {
+    if (!g) return EINVAL;
+    pthread_mutex_lock(&g->mu);
+    if (!g->test_mode) {
+        pthread_mutex_unlock(&g->mu);
+        return EPERM;
+    }
+    g->test_hold_drain = false;
+    pthread_cond_broadcast(&g->idle);
+    pthread_mutex_unlock(&g->mu);
+    return 0;
+}
+uint64_t ng_test_lock_epoch(ng_gate *g) {
+    if (!g) return 0;
+    pthread_mutex_lock(&g->mu);
+    uint64_t epoch = g->lock_epoch;
+    pthread_mutex_unlock(&g->mu);
+    return epoch;
+}
 #endif
 void ng_tick(ng_gate *g) {
     if (!g) return;
     pthread_mutex_lock(&g->mu);
     bool expired = g->opened && ng_continuous_ns() >= g->deadline_ns;
+    if (expired) (void)lock_pairs_locked(g);
     pthread_mutex_unlock(&g->mu);
-    if (expired) ng_lock(g);
 }
 
 int ng_is_open(ng_gate *g) { return g && live(g); }
@@ -599,4 +779,29 @@ void ng_destroy(ng_gate *g) {
     pthread_cond_destroy(&g->idle);
     pthread_mutex_destroy(&g->mu);
     free(g);
+}
+
+int ng_destroy_quiescent(ng_gate *g) {
+    if (!g) return EINVAL;
+    pthread_mutex_lock(&g->mu);
+    if (g->opened || g->accepting || g->listener >= 0 || !idle_locked(g) ||
+        (g->accept_started && (!g->accept_exited || g->accept_joining))) {
+        pthread_mutex_unlock(&g->mu);
+        return EBUSY;
+    }
+    g->destroyed = true;
+    bool detach = g->accept_started && !g->accept_joined;
+    pthread_t accept_thread = g->accept_thread;
+    pthread_mutex_unlock(&g->mu);
+
+    // accept_loop publishes accept_exited only after its final access to g.
+    // Detach releases the join resource without waiting for a live thread.
+    if (detach) {
+        int rc = pthread_detach(accept_thread);
+        if (rc) return rc;
+    }
+    pthread_cond_destroy(&g->idle);
+    pthread_mutex_destroy(&g->mu);
+    free(g);
+    return 0;
 }

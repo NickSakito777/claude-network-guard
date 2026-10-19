@@ -29,6 +29,24 @@ struct lock_context {
     pthread_cond_t cv;
     bool returned;
 };
+struct token_lock_context {
+    ng_gate *gate;
+    uint64_t ticket;
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    bool returned;
+    int result;
+};
+static void *lock_until_gate(void *opaque) {
+    struct token_lock_context *context = opaque;
+    context->result = ng_lock_until(context->gate, context->ticket,
+                                    ng_continuous_ns() + 3000000000ULL);
+    pthread_mutex_lock(&context->mu);
+    context->returned = true;
+    pthread_cond_broadcast(&context->cv);
+    pthread_mutex_unlock(&context->mu);
+    return NULL;
+}
 static void *lock_gate(void *opaque) {
     struct lock_context *context = opaque;
     ng_lock(context->gate);
@@ -37,6 +55,49 @@ static void *lock_gate(void *opaque) {
     pthread_cond_broadcast(&context->cv);
     pthread_mutex_unlock(&context->mu);
     return NULL;
+}
+
+static void init_token_lock_context(struct token_lock_context *context,
+                                    ng_gate *gate, uint64_t ticket) {
+    context->gate = gate;
+    context->ticket = ticket;
+    context->returned = false;
+    context->result = 0;
+    assert(pthread_mutex_init(&context->mu, NULL) == 0);
+    assert(pthread_cond_init(&context->cv, NULL) == 0);
+}
+
+static void assert_token_lock_waiting(struct token_lock_context *context) {
+    struct timespec deadline;
+    assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+    deadline.tv_nsec += 100000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec++;
+        deadline.tv_nsec -= 1000000000L;
+    }
+    pthread_mutex_lock(&context->mu);
+    int rc = 0;
+    while (!context->returned && rc == 0)
+        rc = pthread_cond_timedwait(&context->cv, &context->mu, &deadline);
+    bool returned = context->returned;
+    pthread_mutex_unlock(&context->mu);
+    assert(!returned && rc == ETIMEDOUT);
+}
+
+static void destroy_token_lock_context(struct token_lock_context *context) {
+    assert(pthread_cond_destroy(&context->cv) == 0);
+    assert(pthread_mutex_destroy(&context->mu) == 0);
+}
+
+static void wait_for_lock_epoch_after(ng_gate *gate, uint64_t previous) {
+    struct timespec start, now;
+    assert(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
+    do {
+        if (ng_test_lock_epoch(gate) > previous) return;
+        usleep(1000);
+        assert(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
+    } while (now.tv_sec - start.tv_sec < 1);
+    assert(ng_test_lock_epoch(gate) > previous);
 }
 
 // Production pthread_cond_wait has no hard deadline; this test-only alarm
@@ -252,10 +313,60 @@ static void test_fd_setup_failures_close_and_lock(void) {
     ng_destroy(gate);
 }
 
+static void test_overlapping_lock_ownership(void) {
+    ng_gate *gate = ng_create();
+    assert(gate);
+    ng_test_enable(gate);
+    int listener[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, listener) == 0);
+    assert(ng_test_take_listener_fd(gate, listener[0]) == 0);
+    assert(ng_renew(gate, 1, 3000000000ULL) == 0);
+    assert(ng_test_hold_drain(gate) == 0);
+
+    uint64_t old_ticket = 0;
+    assert(ng_begin_lock(gate, &old_ticket) == 0 && old_ticket != 0);
+    struct token_lock_context old_lock;
+    init_token_lock_context(&old_lock, gate, old_ticket);
+    pthread_t old_waiter;
+    assert(pthread_create(&old_waiter, NULL, lock_until_gate, &old_lock) == 0);
+    assert_token_lock_waiting(&old_lock);
+
+    struct lock_context internal_lock;
+    init_lock_context(&internal_lock, gate);
+    pthread_t internal_waiter;
+    uint64_t old_epoch = ng_test_lock_epoch(gate);
+    assert(pthread_create(&internal_waiter, NULL, lock_gate, &internal_lock) == 0);
+    wait_for_lock_epoch_after(gate, old_epoch);
+    assert_lock_waiting(&internal_lock);
+    assert(ng_renew(gate, 2, 3000000000ULL) == EPERM);
+
+    assert(ng_test_release_drain(gate) == 0);
+    join_with_watchdog(internal_waiter);
+    join_with_watchdog(old_waiter);
+    assert(old_lock.result == ECANCELED);
+    assert(!ng_is_open(gate) && ng_is_bound(gate));
+
+    // A delayed completion carrying the old ticket must not clear or close a
+    // later lease after the newer lock owner has completed.
+    assert(ng_renew(gate, 2, 3000000000ULL) == 0);
+    assert(ng_lock_until(gate, old_ticket, ng_continuous_ns() + 1000000000ULL) == ECANCELED);
+    ng_readback readback;
+    assert(ng_get_readback(gate, &readback) == 0);
+    assert(readback.open && readback.generation == 2);
+
+    ng_lock(gate);
+    ng_revoke(gate);
+    close(listener[1]);
+    ng_destroy(gate);
+    destroy_lock_context(&internal_lock);
+    destroy_token_lock_context(&old_lock);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) return fd_probe_main(argc, argv);
     test_gate_fd_cloexec_exec(argv[0]);
     test_fd_setup_failures_close_and_lock();
+    test_overlapping_lock_ownership();
 
     ng_gate *gate = ng_create();
     assert(gate && !ng_is_open(gate));

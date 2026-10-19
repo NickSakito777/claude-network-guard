@@ -7,7 +7,7 @@ import Dispatch
 // as an OS filtering acknowledgment.
 final class LuLuGateFence {
     private let lock = NSLock()
-    private let gates: [String: SwiftNativeGate]
+    private let gates: [String: GateController]
     private let onFault: (String) -> Void
     private var epoch: UInt64 = 0
     private var bound = false
@@ -18,7 +18,7 @@ final class LuLuGateFence {
     private var permitted: Set<String> = []
     private var launched: Set<String> = []
 
-    init(claude: SwiftNativeGate, sunbrowser: SwiftNativeGate, onFault: @escaping (String) -> Void) {
+    init(claude: GateController, sunbrowser: GateController, onFault: @escaping (String) -> Void) {
         gates = ["claude": claude, "sunbrowser": sunbrowser]
         self.onFault = onFault
     }
@@ -59,7 +59,8 @@ final class LuLuGateFence {
             throw NativeControlError.rejected("open_invalidated")
         }
         // Renew only explicitly selected targets; the other endpoint stays closed.
-        for name in permitted.union([target]).sorted() {
+        try gates[target]!.open(generation: generation)
+        for name in permitted.sorted() where name != target {
             try gates[name]!.renew(generation: generation, leaseMillis: 3_000)
         }
         permitted.insert(target)
@@ -75,7 +76,8 @@ final class LuLuGateFence {
 
     func beginLaunch(target: String) throws -> UInt64 {
         lock.lock(); defer { lock.unlock() }
-        guard !released, bound, permitted.contains(target), gates[target]?.status().open == true else {
+        guard !released, bound, permitted.contains(target), let state = gates[target]?.status(),
+              state.available, state.open else {
             throw NativeControlError.rejected("gate_locked")
         }
         launchCalls += 1
@@ -87,23 +89,34 @@ final class LuLuGateFence {
     func gateOpen(at expected: UInt64, target: String? = nil) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard !released, bound, epoch == expected else { return false }
-        if let target { return permitted.contains(target) && gates[target]?.status().open == true }
-        return !permitted.isEmpty && permitted.allSatisfy { gates[$0]?.status().open == true }
+        if let target {
+            guard let state = gates[target]?.status() else { return false }
+            return permitted.contains(target) && state.available && state.open
+        }
+        return !permitted.isEmpty && permitted.allSatisfy {
+            guard let state = gates[$0]?.status() else { return false }
+            return state.available && state.open
+        }
     }
     func activeTargets() -> [String] { lock.lock(); defer { lock.unlock() }; return permitted.sorted() }
 
     private func allLocked() -> Bool {
-        gates.values.allSatisfy { let state = $0.status(); return state.bound && !state.open && state.activePairs == 0 }
+        gates.values.allSatisfy {
+            let state = $0.status()
+            return state.available && state.bound && !state.open && state.activePairs == 0 && state.pending == 0
+        }
     }
     func gateLocked(at expected: UInt64) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return !released && bound && epoch == expected && allLocked()
     }
-    func status() -> SwiftNativeGate.Status {
+    func status() -> GateControllerStatus {
         lock.lock(); defer { lock.unlock() }
         let states = gates.values.map { $0.status() }
-        return .init(bound: states.allSatisfy(\.bound), open: states.contains(where: \.open),
-                     activePairs: states.reduce(0) { $0 + $1.activePairs })
+        return .init(available: states.allSatisfy(\.available),
+                     bound: states.allSatisfy(\.bound), open: states.contains(where: \.open),
+                     activePairs: states.reduce(0) { $0 + $1.activePairs },
+                     pending: states.reduce(0) { $0 + $1.pending })
     }
     func cleanupState() -> (epoch: UInt64, owned: Bool, pending: Bool,
                            preparation: Int, open: Int, launch: Int, targets: Set<String>) {
@@ -488,8 +501,8 @@ final class LuLuServices {
     var offlineFixture: LuLuOfflineE2EFixture?
     static func makeOfflineFixture(_ scenario: Int32, onFault: @escaping (String) -> Void) throws -> LuLuServices {
         let fixture = try LuLuOfflineE2EFixture(scenario: scenario)
-        let safety = LuLuGateFence(claude: try .fixture(entryPort: 17_897),
-            sunbrowser: try .fixture(entryPort: 17_898), onFault: onFault)
+        let safety = LuLuGateFence(claude: try SwiftNativeGate.fixture(entryPort: 17_897),
+            sunbrowser: try SwiftNativeGate.fixture(entryPort: 17_898), onFault: onFault)
         let service = LuLuServices(manifest: fixture.manifest,
             supervisors: ["claude": fixture.supervisor], safety: safety,
             baselineMonitor: LuLuBaselineMonitor(offlineFixture: ()),
@@ -529,15 +542,17 @@ final class LuLuServices {
             "claude": try LegacyApplicationSupervisor(targets: [claudeTarget]),
             "sunbrowser": try LegacyApplicationSupervisor(targets: [browserTarget], managerLaunchOnly: true)
         ]
-        let claudeGate = try SwiftNativeGate()
-        let browserGate = try SwiftNativeGate(entryPort: 17_898)
         let baselineMonitorRef = LuLuBaselineMonitorRef()
         let extensionMonitorRef = LuLuExtensionMonitorRef()
-        let safety = LuLuGateFence(claude: claudeGate, sunbrowser: browserGate, onFault: { reason in
+        let gateFault: (String) -> Void = { reason in
             onFault(reason)
             baselineMonitorRef.stop()
             extensionMonitorRef.stop()
-        })
+        }
+        let gateHost = try GateHelperHost(onFault: gateFault)
+        let safety = LuLuGateFence(claude: gateHost.endpoint(.claude),
+                                   sunbrowser: gateHost.endpoint(.sunbrowser),
+                                   onFault: gateFault)
         let baselineMonitor = try LuLuBaselineMonitor(
             entries: Self.watchPaths(manifest),
             onChange: { [weak safety] reason in safety?.fault(reason: reason) })

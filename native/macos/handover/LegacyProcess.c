@@ -1,5 +1,6 @@
 #include "LegacyProcess.h"
 #include <errno.h>
+#include <fcntl.h>
 #include <libproc.h>
 #include <Security/Security.h>
 #include <signal.h>
@@ -242,6 +243,46 @@ int lg_spawn_group(const char *launcher, const char *const *argv, size_t argc,
     posix_spawnattr_destroy(&attributes);
     posix_spawn_file_actions_destroy(&actions);
     free(spawn_argv); free(spawn_envp);
+    if (!rc) *out_pid = pid;
+    return rc;
+}
+
+int lg_spawn_controlled_helper(const char *launcher, int source_fd,
+                               int target_fd, pid_t *out_pid) {
+    if (!launcher || launcher[0] != '/' || source_fd < 3 || target_fd < 3 ||
+        source_fd == target_fd || !out_pid) return EINVAL;
+
+    char *const argv[] = { (char *)launcher, NULL };
+    char *const envp[] = { NULL };
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attributes;
+    int rc = posix_spawn_file_actions_init(&actions);
+    if (rc) return rc;
+    rc = posix_spawnattr_init(&attributes);
+    if (rc) {
+        posix_spawn_file_actions_destroy(&actions);
+        return rc;
+    }
+    int spawn_source = source_fd;
+    bool close_spawn_source = false;
+    if (!rc && spawn_source == target_fd) {
+        spawn_source = fcntl(source_fd, F_DUPFD_CLOEXEC, target_fd + 1);
+        if (spawn_source < 0) rc = errno;
+        else close_spawn_source = true;
+    }
+    if (!rc) rc = posix_spawn_file_actions_addopen(&actions, STDIN_FILENO,
+                                           "/dev/null", O_RDONLY, 0);
+    if (!rc) rc = posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO,
+                                                   "/dev/null", O_WRONLY, 0);
+    if (!rc) rc = posix_spawn_file_actions_addopen(&actions, STDERR_FILENO,
+                                                   "/dev/null", O_WRONLY, 0);
+    if (!rc) rc = posix_spawn_file_actions_adddup2(&actions, spawn_source, target_fd);
+    if (!rc) rc = posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
+    pid_t pid = -1;
+    if (!rc) rc = posix_spawn(&pid, launcher, &actions, &attributes, argv, envp);
+    posix_spawnattr_destroy(&attributes);
+    posix_spawn_file_actions_destroy(&actions);
+    if (close_spawn_source) close(spawn_source);
     if (!rc) *out_pid = pid;
     return rc;
 }

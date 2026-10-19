@@ -8,5 +8,5 @@ enum ManagedSessionSourceSnapshot {
     ]
 
     // The checker canonicalizes this literal before hashing to avoid recursion.
-    static let sha256 = "01d278aee7fb29c6937905c7a8576f7c3d909b023de0ea8a734cec08d337e5bb"
+    static let sha256 = "e9f3c9810550f2456b385688488fde23eedffaba02a0ea8d676397fb975b6a96"
 }

@@ -1,5 +1,5 @@
-// [INPUT]: 目标平台、macOS Objective-C 原生/身份凭据桥与 Tauri 配置。
-// [OUTPUT]: 仅 macOS 编译链接系统桥；Linux/Windows 使用 Rust 平台边界，各自加载 Tauri 平台配置。
+// [INPUT]: 目标平台、macOS 原生桥、独立 Gate helper 与 Tauri 配置。
+// [OUTPUT]: macOS 构建静态系统桥及未接入应用的 helper 工件；Linux/Windows 使用各自平台边界。
 // [POS]: 原生宿主的构建边界。
 // [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 #[allow(dead_code)]
@@ -9,6 +9,7 @@ mod privacy_bridge_generator;
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         build_guard_lulu();
+        build_guard_gate_helper();
         cc::Build::new()
             .file("native/Clipboard.m")
             .file("native/Cleanup.m")
@@ -40,6 +41,74 @@ fn main() {
     tauri_build::build();
 }
 
+// Compile the per-session Gate owner as a standalone executable. The app-side
+// controller is linked separately and addresses only its inherited control FD.
+fn build_guard_gate_helper() {
+    use std::{env, fs, path::PathBuf, process::Command};
+
+    let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    let root = manifest.join("../native/macos");
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let modules = out.join("gate-helper-swift-modules");
+    fs::create_dir_all(&modules).expect("create standalone Gate helper Swift cache");
+    let sdk_output = Command::new("/usr/bin/xcrun")
+        .args(["--show-sdk-path"])
+        .output()
+        .expect("read macOS SDK for standalone Gate helper");
+    assert!(sdk_output.status.success(), "macOS SDK unavailable for Gate helper");
+    let sdk = String::from_utf8(sdk_output.stdout).unwrap().trim().to_owned();
+    let arch = match env::var("CARGO_CFG_TARGET_ARCH").unwrap().as_str() {
+        "aarch64" => "arm64",
+        "x86_64" => "x86_64",
+        other => panic!("unsupported Mac architecture for Gate helper: {other}"),
+    };
+    let target = format!("{arch}-apple-macosx13.0");
+    let native_gate = root.join("handover/NativeGate.c");
+    let native_header = root.join("handover/NativeGate.h");
+    let c_object = out.join("NativeGate-gate-helper.o");
+    let helper = out.join("guard-gate-helper");
+
+    println!("cargo:rerun-if-changed={}", native_gate.display());
+    println!("cargo:rerun-if-changed={}", native_header.display());
+    for source in [
+        "handover/GateHelperIPC.swift",
+        "handover/GateHelperProduction.swift",
+        "handover/GateHelperMain.swift",
+    ] {
+        println!("cargo:rerun-if-changed={}", root.join(source).display());
+    }
+
+    let clang = Command::new("/usr/bin/xcrun")
+        .args(["clang", "-std=c11", "-target", &target, "-isysroot", &sdk,
+               "-mmacosx-version-min=13.0", "-Wall", "-Wextra", "-Werror", "-pthread", "-I"])
+        .arg(root.join("handover"))
+        .args(["-c"])
+        .arg(&native_gate)
+        .arg("-o")
+        .arg(&c_object)
+        .output()
+        .expect("compile standalone NativeGate helper object");
+    assert!(clang.status.success(), "NativeGate helper compile failed:\n{}",
+            String::from_utf8_lossy(&clang.stderr));
+
+    let swift = Command::new("/usr/bin/xcrun")
+        .args(["swiftc", "-parse-as-library", "-emit-executable", "-target", &target,
+               "-sdk", &sdk, "-module-cache-path"])
+        .arg(&modules)
+        .arg("-I")
+        .arg(root.join("handover"))
+        .arg(root.join("handover/GateHelperIPC.swift"))
+        .arg(root.join("handover/GateHelperProduction.swift"))
+        .arg(root.join("handover/GateHelperMain.swift"))
+        .arg(&c_object)
+        .arg("-o")
+        .arg(&helper)
+        .output()
+        .expect("compile standalone Gate helper executable");
+    assert!(swift.status.success(), "Gate helper Swift compile failed:\n{}",
+            String::from_utf8_lossy(&swift.stderr));
+}
+
 fn build_guard_lulu() {
     use std::{env, path::PathBuf, process::Command};
     println!("cargo:rerun-if-env-changed=GUARD_OFFLINE_E2E");
@@ -65,6 +134,7 @@ fn build_guard_lulu() {
         "checks/NetworkEventPolicy.swift", "checks/WiFiAssociationEventMonitor.swift",
         "checks/EnvironmentChecker.swift", "checks/RootPortObserver.swift",
         "handover/SwiftNativeGate.swift", "handover/LegacyApplicationSupervisor.swift",
+        "handover/GateHelperIPC.swift", "handover/GateHelperHost.swift",
         "handover/ManagedLaunchCandidate.swift",
         "lulu/LuLuManifest.swift", "lulu/LuLuPolicy.swift", "lulu/LuLuServices.swift",
         "GuardLuLuBridge.swift",

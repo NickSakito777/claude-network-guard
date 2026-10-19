@@ -95,6 +95,44 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
+def built_gate_helper():
+    """Select the freshest production helper emitted by the locked Cargo build."""
+    build_root = ROOT / '.tools/target/debug/build'
+    matches = sorted(build_root.glob('requirement-french-*/out/guard-gate-helper'))
+    if not matches:
+        raise ValueError('Cargo did not produce a standalone Gate helper')
+    candidates = []
+    for helper in matches:
+        metadata = helper.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o111 == 0:
+            continue
+        symbols = subprocess.run(['/usr/bin/nm', '-g', str(helper)],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 check=False)
+        if symbols.returncode != 0 or b'ng_test_' in symbols.stdout:
+            continue
+        candidates.append((metadata.st_mtime_ns, helper))
+    if not candidates:
+        raise ValueError('no regular production Gate helper exists in Cargo outputs')
+    newest = max(stamp for stamp, _ in candidates)
+    newest_helpers = [helper for stamp, helper in candidates if stamp == newest]
+    if len(newest_helpers) != 1:
+        raise ValueError('newest Cargo Gate helper output is ambiguous')
+    helper = newest_helpers[0]
+    source_paths = [
+        ROOT / 'src-tauri/build.rs',
+        ROOT / 'native/macos/handover/NativeGate.c',
+        ROOT / 'native/macos/handover/NativeGate.h',
+        ROOT / 'native/macos/handover/GateHelperIPC.swift',
+        ROOT / 'native/macos/handover/GateHelperProduction.swift',
+        ROOT / 'native/macos/handover/GateHelperMain.swift',
+    ]
+    newest_source = max(path.stat().st_mtime_ns for path in source_paths)
+    if helper.stat().st_mtime_ns < newest_source:
+        raise ValueError('Cargo Gate helper predates a current source input')
+    return helper
+
+
 def _raise_walk_error(error):
     """Do not produce a partial bundle digest when traversal fails."""
     raise error
@@ -541,7 +579,7 @@ def validate_candidate_manifest(raw, bundle_identifier, policy_reference,
 def make_candidate_build_evidence(identity, source_evidence, frontend_dist_sha256,
                                   manifest_raw, manifest_metadata, policy_reference,
                                   binary_sha256, packaged_facts_sha256, icon_sha256,
-                                  toolchain_evidence):
+                                  toolchain_evidence, gate_helper_sha256):
     """Bind exact build inputs without creating a deployment or acceptance receipt."""
     manifest = manifest_metadata['_manifest']
     return {
@@ -562,6 +600,7 @@ def make_candidate_build_evidence(identity, source_evidence, frontend_dist_sha25
             'frontendDistSHA256': frontend_dist_sha256,
             'binarySHA256': binary_sha256,
             'packagedFactsHelperSHA256': packaged_facts_sha256,
+            'packagedGateHelperSHA256': gate_helper_sha256,
             'iconSHA256': icon_sha256,
             'manifestSHA256': hashlib.sha256(manifest_raw).hexdigest(),
             'manifestSchemaVersion': manifest.get('schemaVersion'),
@@ -843,6 +882,7 @@ def build_candidate_app(output_directory, reviewed_manifest_path):
         contents = app / 'Contents'
         macos = contents / 'MacOS'
         resources = contents / 'Resources'
+        helpers = contents / 'Helpers'
 
         print('Building frontend with the existing locked local toolchain.', file=sys.stderr, flush=True)
         subprocess.run(['sh', 'scripts/guard-tool.sh', 'bun', 'run', 'build'],
@@ -864,12 +904,21 @@ def build_candidate_app(output_directory, reviewed_manifest_path):
 
         macos.mkdir(parents=True)
         resources.mkdir()
+        helpers.mkdir()
         binary_path = ROOT / '.tools/target/debug/requirement-french'
         binary_sha256 = file_sha256(binary_path)
         packaged_binary = macos / 'Guard'
         shutil.copy2(binary_path, packaged_binary)
         if file_sha256(packaged_binary) != binary_sha256:
             raise ValueError('copied candidate executable differs from the built binary')
+        packaged_gate_helper = helpers / 'GuardGateHelper'
+        shutil.copy2(built_gate_helper(), packaged_gate_helper)
+        subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-',
+                        '--identifier', 'local.fox.guard.gatehelper',
+                        str(packaged_gate_helper)], env=app_env, check=True)
+        subprocess.run(['/usr/bin/codesign', '--verify', '--strict',
+                        str(packaged_gate_helper)], env=app_env, check=True)
+        gate_helper_sha256 = file_sha256(packaged_gate_helper)
         packaged_facts = resources / 'lulu_facts.py'
         packaged_facts.write_bytes(facts_raw)
         os.chmod(packaged_facts, facts_mode)
@@ -883,7 +932,7 @@ def build_candidate_app(output_directory, reviewed_manifest_path):
         evidence = make_candidate_build_evidence(
             identity, source_before, frontend_dist_sha256, manifest_raw,
             manifest_metadata, policy_reference, binary_sha256,
-            current_facts_sha256, icon_sha256, toolchain_evidence)
+            current_facts_sha256, icon_sha256, toolchain_evidence, gate_helper_sha256)
         (resources / CANDIDATE_BUILD_EVIDENCE).write_text(
             json.dumps(evidence, ensure_ascii=True, indent=2, sort_keys=True) + '\n',
             encoding='utf-8')
@@ -904,6 +953,8 @@ def build_candidate_app(output_directory, reviewed_manifest_path):
                        env=app_env, check=True)
         subprocess.run(['/usr/bin/codesign', '--verify', '--strict', str(app)],
                        env=app_env, check=True)
+        if file_sha256(packaged_gate_helper) != gate_helper_sha256:
+            raise ValueError('outer app signing changed the nested Gate helper bytes')
 
         output_app = output_directory / 'Guard.app'
         if output_app.exists() or output_app.is_symlink():

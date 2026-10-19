@@ -50,6 +50,10 @@ int lg_spawn_group(const char *launcher, const char *const *argv, size_t argc,
                    const char *const *envp, size_t envc,
                    const char *working_directory, int stdin_fd, int stdout_fd,
                    int stderr_fd, pid_t *out_pid);
+// Starts one absolute executable with only one explicitly mapped control FD
+// plus /dev/null stdio. POSIX_SPAWN_CLOEXEC_DEFAULT closes every other FD.
+int lg_spawn_controlled_helper(const char *launcher, int source_fd,
+                               int target_fd, pid_t *out_pid);
 int lg_process_group_count(pid_t pgid, int *out_count);
 int lg_signal_process_group_if_same(const lg_process *leader,
                                     const char *requirement, int signo);

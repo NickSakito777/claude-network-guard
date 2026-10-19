@@ -9,18 +9,57 @@ struct GateHelperSnapshot: Codable, Equatable {
     let pending: UInt32
 }
 
+enum GateHelperTarget: String, Codable, CaseIterable {
+    case claude
+    case sunbrowser
+}
+
+struct GateHelperTargetSnapshot: Codable, Equatable {
+    let target: GateHelperTarget
+    let snapshot: GateHelperSnapshot
+}
+
+// The host still verifies the helper's PID, UID, birth, executable path, and
+// code identity from its own spawn receipt and process snapshot. These wire
+// fields bind READY to that receipt; they are not authority by themselves.
+struct GateHelperProcessIdentity: Codable, Equatable {
+    let pid: Int32
+    let uid: UInt32
+
+    var isValid: Bool { pid > 1 }
+}
+
 enum GateHelperKind: String, Codable {
     case hello
     case ready
+    case initialize
+    case initialized
+    case prepare
+    case prepared
+    case open
+    case opened
+    case renew
+    case renewed
     case status
     case lock
     case locked
     case revoke
     case revoked
+    case heartbeat
+    case alive
     case rejected
 #if GUARD_GATE_FIXTURE_TESTS
     case fixtureReleasePending
     case fixtureFailNextLockThread
+    case fixtureSeedActivity
+    case fixtureSeeded
+    case fixtureHoldDrain
+    case fixtureHeld
+    case fixtureReleaseDrain
+    case fixtureDrainReleased
+    case fixtureStatus
+    case fixtureSnapshot
+    case fixtureFillOutputBuffer
     case fixtureArmed
     case fixturePendingReleased
 #endif
@@ -32,6 +71,11 @@ enum GateHelperRejectReason: String, Codable {
     case epoch
     case sequence
     case generation
+    case policy
+    case peer
+    case state
+    case target
+    case lease
     case command
     case native
 }
@@ -45,6 +89,11 @@ struct GateHelperMessage: Codable {
     let kind: GateHelperKind
     var snapshot: GateHelperSnapshot? = nil
     var reason: GateHelperRejectReason? = nil
+    var target: GateHelperTarget? = nil
+    var hostProcess: GateHelperProcessIdentity? = nil
+    var helperProcess: GateHelperProcessIdentity? = nil
+    var policyVersion: UInt16? = nil
+    var targetSnapshots: [GateHelperTargetSnapshot]? = nil
 }
 
 private struct NativeGateReadback {
@@ -99,6 +148,7 @@ private struct NativeGateReadback {
 private let gateHelperMaximumFrame = 4_096
 private let gateHelperVersion: UInt16 = 1
 private let gateHelperIODeadlineMilliseconds: Int32 = 1_200
+@_silgen_name("ng_continuous_ns") private func gateHelperContinuousNS() -> UInt64
 
 enum GateHelperIOError: Error, CustomStringConvertible {
     case closed
@@ -123,8 +173,10 @@ final class GateHelperChannel {
 
     init(descriptor: Int32) throws {
         self.descriptor = descriptor
+        let descriptorFlags = fcntl(descriptor, F_GETFD)
         let flags = fcntl(descriptor, F_GETFL)
-        guard flags >= 0,
+        guard descriptorFlags >= 0, flags >= 0,
+              fcntl(descriptor, F_SETFD, descriptorFlags | FD_CLOEXEC) == 0,
               fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0 else {
             throw GateHelperIOError.system(errno)
         }
@@ -135,19 +187,63 @@ final class GateHelperChannel {
         }
     }
 
-    func send(_ message: GateHelperMessage) throws {
+    static func isAnonymousUnixStream(_ descriptor: Int32) -> Bool {
+        guard fcntl(descriptor, F_GETFD) >= 0 else { return false }
+        var type: Int32 = 0
+        var typeLength = socklen_t(MemoryLayout<Int32>.size)
+        guard getsockopt(descriptor, SOL_SOCKET, SO_TYPE, &type, &typeLength) == 0,
+              type == SOCK_STREAM else { return false }
+        return isAnonymousUnixEndpoint(descriptor, peer: false) &&
+               isAnonymousUnixEndpoint(descriptor, peer: true)
+    }
+
+    private static func isAnonymousUnixEndpoint(_ descriptor: Int32, peer: Bool) -> Bool {
+        var address = sockaddr_un()
+        var length = socklen_t(MemoryLayout<sockaddr_un>.size)
+        let result = withUnsafeMutablePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                peer ? getpeername(descriptor, $0, &length) : getsockname(descriptor, $0, &length)
+            }
+        }
+        guard result == 0, address.sun_family == sa_family_t(AF_UNIX) else { return false }
+        return withUnsafeBytes(of: &address.sun_path) { bytes in bytes.allSatisfy { $0 == 0 } }
+    }
+
+    func send(_ message: GateHelperMessage, deadline suppliedDeadline: UInt64? = nil) throws {
         guard let body = try? encoder.encode(message),
               !body.isEmpty, body.count <= gateHelperMaximumFrame else {
             throw GateHelperIOError.invalidFrame
         }
-        let deadline = try gateHelperDeadline()
+        let deadline: UInt64
+        if let suppliedDeadline {
+            deadline = suppliedDeadline
+        } else {
+            deadline = try gateHelperDeadline()
+        }
         var length = UInt32(body.count).bigEndian
         try withUnsafeBytes(of: &length) { try writeAll(descriptor, $0, deadline: deadline) }
         try body.withUnsafeBytes { try writeAll(descriptor, $0, deadline: deadline) }
     }
 
-    func receive() throws -> GateHelperMessage {
-        let deadline = try gateHelperDeadline()
+#if GUARD_GATE_FIXTURE_TESTS
+    func fillOutputBufferForFixture() throws {
+        let bytes = [UInt8](repeating: 0xA5, count: 4_096)
+        while true {
+            let count = bytes.withUnsafeBytes {
+                Darwin.send(descriptor, $0.baseAddress!, $0.count, 0)
+            }
+            if count > 0 { continue }
+            if count < 0 && errno == EINTR { continue }
+            if count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) { return }
+            if count == 0 { throw GateHelperIOError.closed }
+            throw GateHelperIOError.system(errno)
+        }
+    }
+#endif
+
+    func receive(timeoutMilliseconds: Int32 = gateHelperIODeadlineMilliseconds) throws -> GateHelperMessage {
+        guard timeoutMilliseconds > 0 else { throw GateHelperIOError.timedOut }
+        let deadline = try gateHelperDeadline(timeoutMilliseconds: timeoutMilliseconds)
         let prefix = try readExactly(descriptor, count: MemoryLayout<UInt32>.size,
                                      deadline: deadline)
         let bytes = [UInt8](prefix)
@@ -184,26 +280,27 @@ final class GateHelperChannel {
     }
 }
 
-private func gateHelperDeadline() throws -> Int64 {
-    var now = timespec()
-    guard clock_gettime(CLOCK_MONOTONIC, &now) == 0 else {
-        throw GateHelperIOError.system(errno)
+private func gateHelperDeadline(timeoutMilliseconds: Int32 = gateHelperIODeadlineMilliseconds) throws -> UInt64 {
+    guard timeoutMilliseconds > 0 else { throw GateHelperIOError.timedOut }
+    let now = gateHelperContinuousNS()
+    let (duration, durationOverflow) = UInt64(timeoutMilliseconds)
+        .multipliedReportingOverflow(by: 1_000_000)
+    let (deadline, deadlineOverflow) = now.addingReportingOverflow(duration)
+    guard !durationOverflow, !deadlineOverflow else {
+        throw GateHelperIOError.system(EOVERFLOW)
     }
-    let current = Int64(now.tv_sec) * 1_000 + Int64(now.tv_nsec) / 1_000_000
-    return current + Int64(gateHelperIODeadlineMilliseconds)
+    return deadline
 }
 
-private func gateHelperWait(_ descriptor: Int32, events: Int16, deadline: Int64) throws {
+private func gateHelperWait(_ descriptor: Int32, events: Int16, deadline: UInt64) throws {
     while true {
-        var now = timespec()
-        guard clock_gettime(CLOCK_MONOTONIC, &now) == 0 else {
-            throw GateHelperIOError.system(errno)
-        }
-        let current = Int64(now.tv_sec) * 1_000 + Int64(now.tv_nsec) / 1_000_000
-        let remaining = deadline - current
-        guard remaining > 0 else { throw GateHelperIOError.timedOut }
+        let now = gateHelperContinuousNS()
+        guard now < deadline else { throw GateHelperIOError.timedOut }
+        let remaining = deadline - now
+        let remainingMilliseconds = remaining / 1_000_000 +
+            (remaining % 1_000_000 == 0 ? 0 : 1)
         var event = pollfd(fd: descriptor, events: events, revents: 0)
-        let result = poll(&event, 1, Int32(min(remaining, Int64(Int32.max))))
+        let result = poll(&event, 1, Int32(min(remainingMilliseconds, UInt64(Int32.max))))
         if result < 0 {
             if errno == EINTR { continue }
             throw GateHelperIOError.system(errno)
@@ -218,10 +315,11 @@ private func gateHelperWait(_ descriptor: Int32, events: Int16, deadline: Int64)
 
 private func writeAll(_ descriptor: Int32,
                       _ bytes: UnsafeRawBufferPointer,
-                      deadline: Int64) throws {
+                      deadline: UInt64) throws {
     guard let base = bytes.baseAddress else { throw GateHelperIOError.invalidFrame }
     var offset = 0
     while offset < bytes.count {
+        guard gateHelperContinuousNS() < deadline else { throw GateHelperIOError.timedOut }
         let count = send(descriptor, base.advanced(by: offset), bytes.count - offset, 0)
         if count > 0 { offset += count; continue }
         if count < 0 && errno == EINTR { continue }
@@ -232,9 +330,12 @@ private func writeAll(_ descriptor: Int32,
         if count == 0 { throw GateHelperIOError.closed }
         throw GateHelperIOError.system(errno)
     }
+    // A successful write means only that the local socket accepted the frame;
+    // the peer may not yet have read it.
+    guard gateHelperContinuousNS() < deadline else { throw GateHelperIOError.timedOut }
 }
 
-private func readExactly(_ descriptor: Int32, count: Int, deadline: Int64) throws -> Data {
+private func readExactly(_ descriptor: Int32, count: Int, deadline: UInt64) throws -> Data {
     guard count > 0 else { throw GateHelperIOError.invalidFrame }
     var data = Data(count: count)
     try data.withUnsafeMutableBytes { bytes in
@@ -252,7 +353,7 @@ private func readExactly(_ descriptor: Int32, count: Int, deadline: Int64) throw
     return data
 }
 
-private final class GateWakePipe {
+final class GateWakePipe {
     let reader: Int32
     let writer: Int32
 
@@ -375,7 +476,7 @@ private func readback(_ gate: OpaquePointer) -> GateHelperSnapshot? {
                               pending: value.pending)
 }
 
-private func readbackABIIsCompatible() -> Bool {
+func gateHelperReadbackABIIsCompatible() -> Bool {
     MemoryLayout<NativeGateReadback>.size == 24 &&
     MemoryLayout<NativeGateReadback>.stride == 24 &&
     MemoryLayout<NativeGateReadback>.alignment == 8 &&
@@ -386,6 +487,7 @@ private func readbackABIIsCompatible() -> Bool {
     MemoryLayout.offset(of: \NativeGateReadback.pending) == 20
 }
 
+#if GUARD_GATE_FIXTURE_TESTS
 enum GateHelperChild {
     static let fixtureGeneration: UInt64 = 41
 
@@ -400,7 +502,7 @@ enum GateHelperChild {
               let sentinel = Int32(arguments[7]) else { return 64 }
         errno = 0
         guard fcntl(sentinel, F_GETFD) == -1 && errno == EBADF else { return 65 }
-        guard readbackABIIsCompatible() else { return 66 }
+        guard gateHelperReadbackABIIsCompatible() else { return 66 }
         guard let gate = ngCreate() else { return 70 }
         ngTestEnable(gate)
         guard ngTestTakeListener(gate, listener) == 0,
@@ -566,6 +668,8 @@ private final class GateHelperSession {
                 generation: currentGeneration, sequence: request.sequence,
                 kind: .fixtureArmed
             ))
+        case .fixtureFillOutputBuffer:
+            try reject(request, reason: .command, generation: currentGeneration)
 #endif
         case .revoke:
             if lockWorker != nil {
@@ -581,10 +685,14 @@ private final class GateHelperSession {
             guard let final = readback(gate) else { throw GateHelperIOError.system(EIO) }
             try channel.send(response(for: request, kind: .revoked, snapshot: final))
             return true
-        case .hello, .ready, .locked, .revoked, .rejected:
+        case .hello, .ready, .initialize, .initialized, .prepare, .prepared,
+             .open, .opened, .renew, .renewed, .locked, .revoked,
+             .heartbeat, .alive, .rejected:
             try reject(request, reason: .command, generation: currentGeneration)
 #if GUARD_GATE_FIXTURE_TESTS
-        case .fixtureReleasePending, .fixturePendingReleased, .fixtureArmed:
+        case .fixtureReleasePending, .fixturePendingReleased, .fixtureArmed,
+             .fixtureSeedActivity, .fixtureSeeded, .fixtureHoldDrain, .fixtureHeld,
+             .fixtureReleaseDrain, .fixtureDrainReleased, .fixtureStatus, .fixtureSnapshot:
             try reject(request, reason: .command, generation: currentGeneration)
 #endif
         }
@@ -664,3 +772,4 @@ private final class GateHelperSession {
         return poll(&event, 1, timeoutMilliseconds) > 0
     }
 }
+#endif

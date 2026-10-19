@@ -22,19 +22,34 @@ void ng_destroy(ng_gate *gate);
 int ng_bind_loopback(ng_gate *gate); // 127.0.0.1:17897 only; initially closed
 int ng_bind_loopback_port(ng_gate *gate, uint16_t port); // fixed 17897/17898 only
 int ng_renew(ng_gate *gate, uint64_t generation, uint64_t lease_ns);
+// Split close from drain so a multi-Gate owner can close every target before
+// waiting on any one of them. Each begin returns a unique owner ticket;
+// superseded tickets cannot clear the current lock state. Deadlines use
+// ng_continuous_ns() units.
+int ng_begin_lock(ng_gate *gate, uint64_t *lock_ticket);
+int ng_lock_until(ng_gate *gate, uint64_t lock_ticket, uint64_t deadline_ns);
+int ng_begin_revoke(ng_gate *gate, uint64_t *lock_ticket);
+int ng_revoke_until(ng_gate *gate, uint64_t lock_ticket, uint64_t deadline_ns);
 void ng_lock(ng_gate *gate); // closes relays and pending accepts; keeps listener bound for locked inspect
 void ng_revoke(ng_gate *gate); // closes listener and every tracked socket
+// Requires a fully drained, revoked gate and a stopped accept thread. Does not
+// wait for a thread or free the gate while native workers still reference it.
+int ng_destroy_quiescent(ng_gate *gate);
 void ng_tick(ng_gate *gate);
 #ifdef NG_OFFLINE_TEST
 int ng_test_adopt_pair(ng_gate *gate, int client_fd, int upstream_fd);
 int ng_test_begin_pending(ng_gate *gate, int client_fd, uint64_t *generation);
 int ng_test_register_pending_upstream(ng_gate *gate, uint64_t generation, int upstream_fd); // Takes ownership on success.
+int ng_test_finish_pending(ng_gate *gate, uint64_t generation); // Completes fixture-only pending work.
 int ng_test_adopt_pending(ng_gate *gate, uint64_t generation);
 void ng_test_enable(ng_gate *gate); // offline fixture only; never binds
 int ng_test_take_listener_fd(ng_gate *gate, int unix_fd); // takes an owned Unix fixture FD
 void ng_test_fail_next_fd_cloexec(void); // injects an offline-only fcntl failure
 void ng_test_fail_next_listener_dup(void); // injects an offline-only duplicate failure
 int ng_test_duplicate_listener_fd(ng_gate *gate); // exercises the poll duplicate path without a listener thread
+int ng_test_hold_drain(ng_gate *gate); // deterministic helper timeout/order fixture barrier
+int ng_test_release_drain(ng_gate *gate);
+uint64_t ng_test_lock_epoch(ng_gate *gate);
 #endif
 uint64_t ng_continuous_ns(void);
 int ng_is_open(ng_gate *gate);

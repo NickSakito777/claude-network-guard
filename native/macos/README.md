@@ -158,8 +158,23 @@ The Swift source origins and pinned upstream digests are recorded in
 The Claude-only LuLu boundary, offline policy fixtures, and remaining platform
 acceptance limits are documented in `../../docs/mac-target-isolation.md`.
 
-Build integration is owned by the parent task and will compile this source as
-a static Swift library. Build/test paths must use fixture data only.
+The source integration now puts both production Gate owners in the standalone
+`GuardGateHelper`; `LuLuServices.make()` reaches it through `GateHelperHost` and
+fixed Claude/SunBrowser endpoints. The host validates the helper's full process
+identity and code requirement, binds an anonymous socketpair with a random
+nonce/epoch, and maps only FD 3 into the helper using `CLOEXEC_DEFAULT`. A
+500 ms heartbeat lets the helper lock, verify empty readback, revoke both
+listeners and exit after three seconds without host activity. The existing
+Claude launch/cleanup path remains in the Guard host; no separate child-owning
+Claude supervisor is wired, so this does not establish forced Claude exit on
+host failure. The offline Gate server fixture uses Unix socketpairs and does
+not bind the protected TCP ports; no live acceptance is implied.
+
+`src-tauri/build.rs` compiles the static Swift bridge and the standalone Gate
+helper. `scripts/build-guard-macos-local.py` packages and separately signs the
+helper in `Contents/Helpers` and records its hash in candidate build evidence.
+Build/test paths must use fixture data only; do not install or launch the
+candidate as a substitute for live acceptance.
 
 
 2026-10-15 source repair: compare each site's IP before issuing the next request;

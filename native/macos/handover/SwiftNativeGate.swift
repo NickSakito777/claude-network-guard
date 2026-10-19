@@ -19,11 +19,29 @@ import Darwin
 
 enum NativeGateError: Error, Equatable { case allocation, bind(Int32), renewal(Int32) }
 
+struct GateControllerStatus {
+    let available: Bool
+    let bound: Bool
+    let open: Bool
+    let activePairs: Int
+    let pending: Int
+}
+
+protocol GateController: AnyObject {
+    var entryPort: UInt16 { get }
+    func prepareClosed() throws
+    func open(generation: UInt64) throws
+    func renew(generation: UInt64, leaseMillis: UInt64) throws
+    func revoke()
+    func lock()
+    func status() -> GateControllerStatus
+}
+
 // Install this object only behind the authenticated native controller. The C
 // service owns one fixed target endpoint, closes on lease expiry independently of the UI event loop,
 // and never accepts an upstream other than 127.0.0.1:7896.
-final class SwiftNativeGate {
-    struct Status { let bound: Bool; let open: Bool; let activePairs: Int }
+final class SwiftNativeGate: GateController {
+    typealias Status = GateControllerStatus
     private let handle: OpaquePointer
     let entryPort: UInt16
     private let stateLock = NSLock()
@@ -76,6 +94,10 @@ final class SwiftNativeGate {
         guard code == 0 else { throw NativeGateError.renewal(code) }
     }
 
+    func open(generation: UInt64) throws {
+        try renew(generation: generation, leaseMillis: 3_000)
+    }
+
     func revoke() {
         stateLock.lock()
         defer { stateLock.unlock() }
@@ -89,8 +111,8 @@ final class SwiftNativeGate {
     }
     func status() -> Status {
         cTick(handle)
-        return Status(bound: cBound(handle) != 0,
-                      open: cOpen(handle) != 0, activePairs: cPairs(handle))
+        return Status(available: true, bound: cBound(handle) != 0,
+                      open: cOpen(handle) != 0, activePairs: cPairs(handle), pending: 0)
     }
 
     deinit {
